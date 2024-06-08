@@ -16,6 +16,11 @@ python ./tmdb-importer
 
 就可以使用
 
+之後可以輸入影音網站網址，或者輸入 excel 將 excel 資料上載
+
+而 TMDB 可以輸入 TMDB 網址，或直接按 ENTER，這樣的話就會將影音網站的資料儲存在 excel
+
+用家可以將 excel 內容修改後再上載到 TMDB
 
 注意:如果有 SSL error 請忽略，沒有問題的
 
