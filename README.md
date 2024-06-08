@@ -1,5 +1,5 @@
 # tmdb-importer
-將 Netflix, Disney Plus, Amazon Prime Video, Apple TV+ 等香港版的影音資料如標題簡介上載到 TMDB
+將 Netflix, Disney Plus, Amazon Prime Video, Apple TV+ 等香港版的影音資料如標題簡介上載到 TMDB. 
 全部由 ChatGPT 編寫，是自家用
 
 運行前需要安裝 python
