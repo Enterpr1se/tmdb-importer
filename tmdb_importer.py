@@ -90,7 +90,9 @@ def main():
                 print("只可以輸入 TMDB 的網址或直接按 enter。請重新輸入。")
 
         if driver is None:
-            driver = webdriver.Chrome()
+            options = webdriver.ChromeOptions()
+            options.add_argument('--log-level=3')  # 隱藏所有的 INFO 以下日誌信息
+            driver = webdriver.Chrome(options=options)
 
         while True:
             try:
