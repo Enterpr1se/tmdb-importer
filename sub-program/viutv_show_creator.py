@@ -81,7 +81,8 @@ def _parse_episode_cards(soup) -> dict[int, dict]:
         ep_desc = _extract_card_description(card)
 
         ep_runtime = 0
-        for badge in card.find_all(class_='badge-indicator'):
+        # viu.tv renamed the badge class: old 'badge-indicator', new 'badge-content-card'
+        for badge in card.find_all(class_=lambda c: c in ('badge-indicator', 'badge-content-card')):
             if 'badge--member' not in badge.get('class', []):
                 text = badge.get_text(strip=True)
                 if _is_time_badge(text):

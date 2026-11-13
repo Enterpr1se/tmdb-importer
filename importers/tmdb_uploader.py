@@ -271,6 +271,17 @@ def is_episode_generic_title(title):
 
 from others.utils import convert_runtime_to_minutes  # 新增導入
 
+
+def _valid_runtime(value):
+    """Return a positive int runtime, or None when the source has no runtime (None / '' / 0 / NaN / junk)."""
+    if value is None:
+        return None
+    try:
+        minutes = int(float(str(value).strip()))
+    except (ValueError, TypeError):
+        return None
+    return minutes if minutes > 0 else None
+
 def check_and_fill_form(driver, title_field_id, overview_field_id, excel_path, sheet_name, excel_title, excel_description, runtime=None, overwrite_titles='ask', overwrite_descriptions='ask', tmdb_id=None, video_url=None, perfect_title=None, perfect_description=None, air_date=None):
     """
     【修改版】檢查並填寫表單。
@@ -456,7 +467,10 @@ def check_and_fill_form(driver, title_field_id, overview_field_id, excel_path, s
             else:
                 logging.warning("描述：意圖更新，但欄位已鎖定。")
         
-        # --- 時長更新邏輯 (保持不變) ---
+        # --- 時長更新邏輯：0 / 空白 = 來源冇資料，唔改 TMDB ---
+        runtime = _valid_runtime(runtime)
+        if runtime is None:
+            logging.debug("Excel 時長為 0 或空白，視為冇資料，唔更新 TMDB 時長。")
         if runtime is not None:
             try:
                 runtime_field = driver.find_element(By.ID, 'runtime')
@@ -1358,6 +1372,7 @@ def _decide_what_to_update(
         else:
             logging.info("描述無需更新 (Excel 中為空)。")
 
+    excel_runtime = _valid_runtime(excel_runtime)  # 0 / 空白 = 來源冇資料，唔改 TMDB
     if excel_runtime is not None and str(excel_runtime) != str(current_runtime or ''):
         updates['runtime'] = excel_runtime
 
