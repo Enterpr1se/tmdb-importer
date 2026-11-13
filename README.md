@@ -82,5 +82,5 @@
 
 ## 其他
 
-- `sub-program/` 入面係獨立小工具，同主程式分開運行。
+- `sub-program/` 入面係獨立小工具，同主程式分開運行。雙擊 `sub-program/tools.bat` 開小工具面板，可以揀工具運行、睇佢哋搵到嘅網址（`sub-program/<工具>_urls.txt`），再撳「匯入 Excel」加到 `bulk_videos.xlsx` 某張工作表或者新工作表（已經有嘅網址會略過，主程式運行緊都可以匯入）。
 - 開發同修改須知見 `AI_HANDOFF.md`。

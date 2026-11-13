@@ -42,7 +42,7 @@ start.py
 | `others/owned_procs.py` | 記錄程式自己開嘅瀏覽器 / driver PID，結束時只殺呢啲 |
 | `others/chrome_process.py`、`credentials.py` | 瀏覽器啟動、各網站登入 |
 | `monitor_gui.py` / `start.bat` | 監控面板：讀 log 同 Excel 顯示進度、啟動/停止/暫停 start.py、AI 被拒用詞清單 |
-| `sub-program/` | 獨立小工具（viu.tv 批量更新等），同主程式分開。搵 TMDB 網址嘅工具**只輸出到 `sub-program/<工具>_urls.txt`**（`bulk_txt.py`），唔可以直接寫 `bulk_videos.xlsx`。MissAV 名單由 `missav_bookmarklet.html`（用家瀏覽器書籤小程式）下載，`tmdb_merged_runner.py` 選項 4 讀取 |
+| `sub-program/` | 獨立小工具（viu.tv 批量更新等），同主程式分開。搵 TMDB 網址嘅工具**只輸出到 `sub-program/<工具>_urls.txt`**（`bulk_txt.py`），唔可以直接寫 `bulk_videos.xlsx`。MissAV 名單由 `missav_bookmarklet.html`（用家瀏覽器書籤小程式）下載，`tmdb_merged_runner.py` 選項 4 讀取。總面板：`tools.bat` → `tools_gui.py`（每個工具開新命令視窗；加新工具要加入 `TOOLS` 清單）。唯一例外：面板「匯入 Excel」（`bulk_txt.import_urls_to_bulk`）由用家手動觸發，用同主程式一樣嘅 `bulk_videos.xlsx.lock`，匯入期間每 3 秒更新 lock 時間（主程式當 15 秒冇更新係過期），openpyxl 加喺工作表底部、暫存檔驗證後取代，改前備份 `data/backup/bulk_videos.before_import.xlsx` |
 | `_archive/` | 已停用嘅舊檔，唔好再用 |
 
 ### 資料與設定（全部 gitignored）
@@ -142,7 +142,7 @@ AI 校對（relaxed 模式，預設）規則：
   `WIKI_NAME_REPLACES_EXISTING` / `CLEAR_TMDB_WHEN_SOURCE_EMPTY` 全域值。分集次序：該行分集欄 → 程式分集選項 → 劇集設定（含該行劇集欄）。
 - 空行（`_is_blank_bulk_row`：Video URL 同 TMDB URL 都冇內容）：整理 Excel（`normalize_and_deduplicate_urls`，開始時同轉工作表時）會刪除，
   下面嘅行上移；運行中途出現嘅空行唔會入隊（以前會寫 Done=0）。中途唔可以刪行，因為行號會變。
-  `sub-program/*` 加網址嘅工具仍然只寫 `Bulk`。
+  `sub-program/*` 加網址嘅工具唔寫 Excel，只輸出 `sub-program/<工具>_urls.txt`。
 - `EXCEL_LOCK` 爭用訊息係程式內部鎖，唔係 Excel 本身鎖檔。
 - bulk 中途可以喺 Excel **底部**加行（以 index 對應），唔好喺中間插入或重排。
 - Netflix OTP 登入後會自動跳去 /browse，要確認頁面真係該作品詳情頁先抓取。
