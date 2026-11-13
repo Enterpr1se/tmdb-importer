@@ -70,6 +70,10 @@ System Volume Information/
 _backup_*/
 monitor_settings.json
 
+# Local AI notes: handoff, user preferences, private constraints, decision log (never upload)
+AI_HANDOFF.md
+AI_MEMORY.md
+
 # Old code and personal output lists (never upload)
 _archive/
 sub-program/*.txt
