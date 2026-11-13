@@ -34,7 +34,7 @@ from others.utils import (
     is_all_hanzi, is_valid_zh_hk_title, compare_with_zh_hk
 )
 from others.tw_hk_name import select_tw_hk_sheet
-from others.wiki_queue import search_wiki_for_hk_name_queued as search_wiki_for_hk_name, lookup_hk_name_by_wikidata_queued
+from others.wiki_queue import search_wiki_for_hk_name_queued as search_wiki_for_hk_name, lookup_hk_name_by_wikidata_queued, lookup_ja_kanji_name_by_wikidata_queued
 
 # 【修改】移除會導致循環導入的 import
 # from tmdb_importer import _PROGRAM_INTERRUPTED
@@ -174,6 +174,23 @@ def _is_jk_person(data_dict):
         return True
     pob = (data_dict.get("place_of_birth") or "").lower()
     return any(k in pob for k in ('japan', 'korea', '日本', '韓國', '韩国', '한국', '대한민국', '朝鮮'))
+
+
+def _has_chinese_person_name(data_dict):
+    """【2026-11】TMDB 已有可用嘅中文 / 漢字人名（zh-HK / TW / CN、中文原名、中文別名、全漢字 ja-JP）。"""
+    names = [data_dict.get(k) or "" for k in ("zh_hk_name", "zh_tw_name", "zh_cn_name", "original_title_or_name")]
+    names += [a for a in (data_dict.get("also_known_as") or []) if isinstance(a, str)]
+    if any(is_chinese(n) for n in names):
+        return True
+    return is_all_hanzi((data_dict.get("all_name_translations") or {}).get("ja-JP") or "")
+
+
+def _person_ja_value(data_dict):
+    """【2026-11】人名嘅日文候選：TMDB ja-JP 係全漢字就用佢，否則用 Wikidata 日文漢字名（B）。"""
+    ja = (data_dict.get("all_name_translations") or {}).get("ja-JP")
+    if ja and is_all_hanzi(ja):
+        return ja
+    return data_dict.get("wiki_ja_kanji_name") or ja
 
 
 def is_korean(text):
@@ -425,8 +442,10 @@ async def get_api_data_for_item(client, semaphore, api_key, base_url_tmdb, endpo
             original_is_japanese = bool(original_name and is_japanese(original_name))
             # 【2026-11】西方名：就算已有 TW / CN 譯名，都先用 TMDB 嘅 Wikidata ID 搵中文維基 zh-hk 譯名
             # （例如 Tom Cruise：湯姆·克魯斯 → 湯·告魯斯）。搵唔到就照舊用以下流程。
+            # 【2026-11】A：日韓人名都先用 Wikidata ID（以前只用名稱搜尋，成功率極低）。
             # 選項「維基譯名取代現有香港人名」= n 而 TMDB 已有中文香港人名 → 唔使查（結果唔會用）
-            if (data_dict.get("wikidata_id") and _is_western_person_name(original_name, zh_tw_name, zh_cn_name)
+            is_jk = _is_jk_person(data_dict)
+            if (data_dict.get("wikidata_id") and (is_jk or _is_western_person_name(original_name, zh_tw_name, zh_cn_name))
                     and (utils.wiki_name_replaces_existing() or not is_chinese(data_dict.get("zh_hk_name") or ""))):
                 hk_by_qid = await asyncio.to_thread(lookup_hk_name_by_wikidata_queued, item_id_for_cache,
                                                     data_dict["wikidata_id"], original_name)
@@ -442,7 +461,7 @@ async def get_api_data_for_item(client, semaphore, api_key, base_url_tmdb, endpo
             elif not utils.wiki_name_replaces_existing() and is_chinese(data_dict.get("zh_hk_name") or ""):
                 # 選項 = n 而 TMDB 已有中文香港人名 → 搵到都唔會用，唔使搜
                 logging.info(f"TMDB 已有香港人名 '{data_dict.get('zh_hk_name')}' 且選項為保留，跳過後備維基百科搜索。")
-            elif (data_dict.get("wikidata_id") and item_id_for_cache and not _is_jk_person(data_dict)
+            elif (data_dict.get("wikidata_id") and item_id_for_cache and not is_jk
                     and _wikidata_cache_lookup(item_id_for_cache) == (None, False)):
                 # 【2026-11】Wikidata 已確認冇中文維基頁（非日韓人）→ 名稱搜尋幾乎一定都搵唔到，跳過，避免阻塞維基隊列
                 logging.info(f"Wikidata ({data_dict['wikidata_id']}) 已確認冇中文維基頁，且非日韓人名，跳過後備維基百科搜索。")
@@ -546,6 +565,15 @@ async def get_api_data_for_item(client, semaphore, api_key, base_url_tmdb, endpo
                                     data_dict['wiki_zh_hk_name'] = wiki_hk_name
                             else:
                                 logging.info(f"後備維基百科搜尋失敗，未能找到香港譯名。")
+
+            # 【2026-11】B：日韓人名搵唔到任何中文名、TMDB 又冇漢字名 → 用 Wikidata 日文漢字名（低優先，見 _person_ja_value）
+            if (is_jk and data_dict.get("wikidata_id") and not data_dict.get("wiki_zh_hk_name")
+                    and not _has_chinese_person_name(data_dict)):
+                kanji = await asyncio.to_thread(lookup_ja_kanji_name_by_wikidata_queued, item_id_for_cache,
+                                                data_dict["wikidata_id"], original_name)
+                if utils._PROGRAM_INTERRUPTED: return {}
+                if kanji:
+                    data_dict['wiki_ja_kanji_name'] = kanji
     
     except (KeyboardInterrupt, SystemExit):
         logging.warning(f"get_api_data_for_item 檢測到中斷信號。")
@@ -1105,7 +1133,7 @@ async def extract_person_details(client, semaphore, person_id, api_key, url, dri
                 found_chinese_alias = alias
                 break
 
-    name_candidate, name_should_write, _, name_was_imperfect = process_translatable_item(item_type="name", media_category="person", zh_hk_value=api_data.get("zh_hk_name"), zh_tw_value=api_data.get("zh_tw_name"), zh_cn_value=api_data.get("zh_cn_name") or found_chinese_alias, en_value=api_data.get('wiki_zh_hk_name'), ja_value=api_data.get('all_name_translations', {}).get('ja-JP'), original_value=api_data.get("original_title_or_name"), context_for_logging=context_main)
+    name_candidate, name_should_write, _, name_was_imperfect = process_translatable_item(item_type="name", media_category="person", zh_hk_value=api_data.get("zh_hk_name"), zh_tw_value=api_data.get("zh_tw_name"), zh_cn_value=api_data.get("zh_cn_name") or found_chinese_alias, en_value=api_data.get('wiki_zh_hk_name'), ja_value=_person_ja_value(api_data), original_value=api_data.get("original_title_or_name"), context_for_logging=context_main)
     bio_candidate, bio_should_write, _, bio_was_imperfect = process_translatable_item(item_type="bio", media_category="person", zh_hk_value=api_data.get("zh_hk_bio"), zh_tw_value=api_data.get("zh_tw_bio"), zh_cn_value=api_data.get("zh_cn_bio"), context_for_logging=context_main,
                                                                                       protect_names=_bio_protect_names(api_data, name_candidate, found_chinese_alias))
 
@@ -1203,7 +1231,7 @@ async def extract_person_details_for_credits(client, semaphore, api_key, tmdb_id
                     found_chinese_alias = alias
                     break
         
-        name_candidate, name_should_write, _, name_was_imperfect = process_translatable_item(item_type="name", media_category="person", zh_hk_value=api_person_data.get("zh_hk_name"), zh_tw_value=api_person_data.get("zh_tw_name"), zh_cn_value=api_person_data.get("zh_cn_name") or found_chinese_alias, en_value=api_person_data.get('wiki_zh_hk_name'), ja_value=api_person_data.get('all_name_translations', {}).get('ja-JP'), original_value=api_person_data.get("original_title_or_name"), context_for_logging=context_prefix)
+        name_candidate, name_should_write, _, name_was_imperfect = process_translatable_item(item_type="name", media_category="person", zh_hk_value=api_person_data.get("zh_hk_name"), zh_tw_value=api_person_data.get("zh_tw_name"), zh_cn_value=api_person_data.get("zh_cn_name") or found_chinese_alias, en_value=api_person_data.get('wiki_zh_hk_name'), ja_value=_person_ja_value(api_person_data), original_value=api_person_data.get("original_title_or_name"), context_for_logging=context_prefix)
         bio_candidate, bio_should_write, _, bio_was_imperfect = process_translatable_item(item_type="bio", media_category="person", zh_hk_value=api_person_data.get("zh_hk_bio"), zh_tw_value=api_person_data.get("zh_tw_bio"), zh_cn_value=api_person_data.get("zh_cn_bio"), context_for_logging=context_prefix,
                                                                                           protect_names=_bio_protect_names(api_person_data, name_candidate, found_chinese_alias))
 

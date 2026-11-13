@@ -1156,15 +1156,16 @@ WIKIDATA_CACHE_TYPE = 'person_qid'
 WIKIDATA_NOT_FOUND_RECHECK_DAYS = 90
 
 
-def _wikidata_cache_lookup(item_id):
-    """回傳 (hk_name 或 None, 是否要重新查詢)。"""
+def _wikidata_cache_lookup(item_id, cache_type=None):
+    """回傳 (hk_name 或 None, 是否要重新查詢)。cache_type 預設 WIKIDATA_CACHE_TYPE（中文名）。"""
+    cache_type = cache_type or WIKIDATA_CACHE_TYPE
     try:
         if not os.path.exists(DB_FILE):
             return None, True
         conn = sqlite3.connect(DB_FILE)
         try:
             row = conn.execute("SELECT hk_name, status, timestamp FROM wiki_cache WHERE item_id = ? AND media_type = ?",
-                               (str(item_id), WIKIDATA_CACHE_TYPE)).fetchone()
+                               (str(item_id), cache_type)).fetchone()
         finally:
             conn.close()
     except Exception as e:
@@ -1239,3 +1240,76 @@ def lookup_hk_name_by_wikidata(item_id, wikidata_id, original_name=None):
         _save_to_wiki_cache(item_id, WIKIDATA_CACHE_TYPE, hk_name, 'FOUND' if hk_name else 'NOT_FOUND',
                             original_name, None)
     return hk_name
+
+
+# 【2026-11】B：日文漢字名。日本人（同用漢字名嘅韓國人）搵唔到中文名、TMDB 又冇漢字名時，
+# 用 Wikidata 日文標籤 / 日文維基頁名，只接受全漢字（「々」換成前一個字），新字體轉繁體。
+WIKIDATA_JA_CACHE_TYPE = 'person_qid_ja_kanji'
+
+
+# 人名專用：日文新字體 → 繁體（廣 / 關 / 邊 / 澤…）。用 OpenCC 官方 JPVariants.txt 反向（只限一對一），加少量補充。
+# 一般文字唔用呢個表：主流程嘅 jp2t 刻意只得幾個字，因為新字體好多同簡體重疊（見 AI_HANDOFF）。
+_NAME_SHINJITAI_EXTRA = {'啓': '啟', '﨑': '崎', '髙': '高', '𠮷': '吉', '濵': '濱', '槇': '槙'}
+_name_shinjitai_map = None
+
+
+def _shinjitai_name_to_trad(name):
+    global _name_shinjitai_map
+    if _name_shinjitai_map is None:
+        rev = {}
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'opencc_data', 'dictionary', 'JPVariants.txt')
+        try:
+            with open(path, encoding='utf-8') as f:
+                for line in f:
+                    parts = line.rstrip('\n').split('\t')
+                    if len(parts) == 2 and not line.startswith('#'):
+                        for jp in parts[1].split():
+                            rev.setdefault(jp, set()).add(parts[0])
+        except OSError as e:
+            logging.warning(f"[Wikidata] 讀取 JPVariants.txt 失敗（{e}），日文漢字名唔轉繁體。")
+        _name_shinjitai_map = {jp: next(iter(t)) for jp, t in rev.items() if len(t) == 1 and jp != next(iter(t))}
+        _name_shinjitai_map.update(_NAME_SHINJITAI_EXTRA)
+    return ''.join(_name_shinjitai_map.get(c, c) for c in name)
+
+
+def _to_kanji_name(name):
+    name = re.sub(r'\s*[(（][^)）]*[)）]\s*$', '', str(name or '')).strip()   # 「渡辺謙 (俳優)」
+    name = re.sub(r'[\s\u3000]', '', name)
+    name = re.sub(r'(.)々', r'\1\1', name)                                   # 佐々木 → 佐佐木
+    name = _shinjitai_name_to_trad(name)                                    # 平田広明 → 平田廣明
+    return name if 2 <= len(name) <= 8 and is_all_hanzi(name) else None
+
+
+def lookup_ja_kanji_name_by_wikidata(item_id, wikidata_id, original_name=None):
+    """用 Wikidata ID 攞人物嘅日文漢字名（標籤優先，其次日文維基頁名）。唔係全漢字就回傳 None。"""
+    _reset_rate_limit_flag()
+    _init_db()
+    if not wikidata_id or not re.fullmatch(r'Q\d+', str(wikidata_id)):
+        return None
+    cached, need_query = _wikidata_cache_lookup(item_id, WIKIDATA_JA_CACHE_TYPE) if item_id else (None, True)
+    if cached or not need_query:
+        logging.info(f"[Wikidata] 日文漢字名快取命中 '{original_name}' ({wikidata_id}): {cached or '冇'}")
+        return cached
+    try:
+        j = _wiki_api_get('https://www.wikidata.org/w/api.php', {
+            'action': 'wbgetentities', 'ids': wikidata_id, 'props': 'labels|sitelinks',
+            'languages': 'ja', 'sitefilter': 'jawiki', 'format': 'json'})
+        if j is None:
+            return None
+        ent = j.get('entities', {}).get(wikidata_id, {})
+        label = ent.get('labels', {}).get('ja', {}).get('value')
+        title = ent.get('sitelinks', {}).get('jawiki', {}).get('title')
+    except Exception as e:
+        logging.warning(f"[Wikidata] 查詢日文名 '{original_name}' ({wikidata_id}) 失敗: {e}")
+        return None
+    kanji = _to_kanji_name(label) or _to_kanji_name(title)
+    if kanji:
+        logging.info(f"[Wikidata] '{original_name}' ({wikidata_id}) 日文漢字名: '{kanji}'（標籤 '{label}'）")
+    else:
+        logging.info(f"[Wikidata] '{original_name}' ({wikidata_id}) 冇全漢字日文名（標籤 '{label}'，頁名 '{title}'）。")
+    if item_id:
+        _save_to_wiki_cache(item_id, WIKIDATA_JA_CACHE_TYPE, kanji, 'FOUND' if kanji else 'NOT_FOUND',
+                            original_name, None)
+    return kanji
+

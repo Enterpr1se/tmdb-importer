@@ -1754,8 +1754,13 @@ def normalize_and_deduplicate_urls(file_path='data/bulk_videos.xlsx'):
 
             # --- 正規化步驟 ---
             # 正規化 TMDB URL 和 Video URL 欄中的 TMDB 連結，去除 slug（例如 /tv/301944-marriage-toxin → /tv/301944）。
-            bulk_df['Video URL'] = bulk_df.get('Video URL', pd.Series(dtype=str)).fillna('').astype(str).apply(normalize_tmdb_url)
-            bulk_df['TMDB URL'] = bulk_df.get('TMDB URL', pd.Series(dtype=str)).fillna('').astype(str).apply(normalize_tmdb_url)
+            # 【2026-11】記錄有幾多格真係改咗：以前只係有重複 / 空行先儲存，淨係正規化咗嘅網址唔會寫返入 Excel
+            urls_normalized = 0
+            for _col in ('Video URL', 'TMDB URL'):
+                _before = bulk_df.get(_col, pd.Series(dtype=str)).fillna('').astype(str)
+                _after = _before.apply(normalize_tmdb_url)
+                urls_normalized += int((_before.str.strip() != _after.str.strip()).sum())
+                bulk_df[_col] = _after
 
             # --- 去重步驟 ---
             # 優先使用 'TMDB URL' 作為去重鍵。如果為空，則使用 'Video URL' (如果它是TMDB URL)。
@@ -1792,14 +1797,14 @@ def normalize_and_deduplicate_urls(file_path='data/bulk_videos.xlsx'):
             final_row_count = len(bulk_df)
             rows_removed = original_row_count - final_row_count
 
-            if rows_removed > 0:
-                logging.info(f"URL 正規化與去重完成。共移除了 {duplicates_removed} 個重複的 TMDB 項目、{blank_removed} 個空行。")
+            if rows_removed > 0 or urls_normalized > 0:
+                logging.info(f"URL 正規化與去重完成。正規化了 {urls_normalized} 個網址，移除了 {duplicates_removed} 個重複的 TMDB 項目、{blank_removed} 個空行。")
                 all_sheets[_sheet] = bulk_df
 
                 write_excel_atomic(file_path, all_sheets)
                 logging.info(f"已將正規化、去重並重新索引後的 '{_sheet}' 工作表 ({final_row_count} 行) 保存回 {file_path}。")
             else:
-                logging.info("URL 經正規化後未發現重複項目或空行，無需修改檔案。")
+                logging.info("網址已經係正規格式，亦未發現重複項目或空行，無需修改檔案。")
 
     except Exception as e:
         logging.error(f"在 URL 正規化與去重過程中發生錯誤: {e}\n{traceback.format_exc()}")

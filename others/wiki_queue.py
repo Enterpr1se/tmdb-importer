@@ -117,6 +117,18 @@ def lookup_hk_name_by_wikidata_queued(item_id, wikidata_id, original_name=None):
     return _run_queued(lookup_hk_name_by_wikidata, (item_id, wikidata_id, original_name), {})
 
 
+def lookup_ja_kanji_name_by_wikidata_queued(item_id, wikidata_id, original_name=None):
+    """【2026-11】經隊列執行 wiki_search.lookup_ja_kanji_name_by_wikidata；快取命中唔使排隊。"""
+    from others.wiki_search import (_init_db, _wikidata_cache_lookup, lookup_ja_kanji_name_by_wikidata,
+                                    WIKIDATA_JA_CACHE_TYPE)
+    _init_db()
+    if item_id:
+        cached, need_query = _wikidata_cache_lookup(item_id, WIKIDATA_JA_CACHE_TYPE)
+        if cached or not need_query:
+            return cached
+    return _run_queued(lookup_ja_kanji_name_by_wikidata, (item_id, wikidata_id, original_name), {})
+
+
 def _run_queued(func, args, kwargs):
     from others import utils
     if utils._PROGRAM_INTERRUPTED:

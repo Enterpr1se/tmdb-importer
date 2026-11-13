@@ -350,12 +350,32 @@ def _force_exit(exit_code=130, message="\n[Ctrl+C] 第二次 Ctrl+C：正在強�
     os._exit(exit_code)
 
 
+def _log_stuck_thread_stacks(stuck_threads):
+    """【2026-11】強制結束前，將卡住嘅執行緒停喺邊一行寫入 log，方便之後搵原因。"""
+    try:
+        import sys as _sys
+        import traceback as _tb
+        frames = _sys._current_frames()
+        for t in stuck_threads:
+            frame = frames.get(t.ident)
+            if frame is None:
+                continue
+            stack = ''.join(_tb.format_stack(frame)[-15:])   # 最尾 15 層已足夠
+            logging.warning(f"[卡住位置] 執行緒 {t.name} 目前停喺:\n{stack}")
+    except Exception as e:
+        try:
+            logging.warning(f"[卡住位置] 無法取得執行緒堆疊: {e}")
+        except Exception:
+            pass
+
+
 def exit_if_threads_stuck(threads):
     """【2026-11 F1】工作執行緒 join 逾時後仍未結束時使用。
     若 threads 中仍有非 daemon 執行緒存活，Python 結束時會無限等待它們（程式及其瀏覽器殘留），
     所以在此記錄卡住的執行緒，關閉本程式自己開啟的 driver / 瀏覽器（子孫行程），然後結束程式。
     所有執行緒都已正常結束時不做任何事。"""
-    stuck = [t.name for t in threads if t is not None and t.is_alive() and not t.daemon]
+    stuck_threads = [t for t in threads if t is not None and t.is_alive() and not t.daemon]
+    stuck = [t.name for t in stuck_threads]
     if not stuck:
         return
     try:
@@ -363,6 +383,7 @@ def exit_if_threads_stuck(threads):
                         f"將關閉本程式開啟的瀏覽器並結束程式。")
     except Exception:
         pass
+    _log_stuck_thread_stacks(stuck_threads)
     _force_exit(130 if _PROGRAM_INTERRUPTED else 1,
                 message=f"\n[結束] 執行緒卡住未能結束 ({', '.join(stuck)})，"
                         f"正在關閉本程式開啟的瀏覽器並結束程式...\n")
