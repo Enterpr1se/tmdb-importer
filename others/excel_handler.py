@@ -64,6 +64,9 @@ _pending_done_lock = threading.Lock()
 _batch_update_thread = None
 _batch_worker_running = False
 _excel_lock = None  # 由 start_batch_update_worker 注入，與 extractor 共用同一把鎖
+# 【2026-11-13】同一程式內同一時間只准一個 Done 批次寫入（背景 worker、flush、停止時收尾）。
+# 以前停止時 worker 自動重開會令 _excel_lock 變 None，兩邊同時寫同一個暫存檔 → 驗證失敗。
+_batch_write_lock = threading.Lock()
 _batch_permission_warned = False  # PermissionError 日誌節流，成功寫入後重置
 _batch_flush_event = threading.Event()
 _STALE_LOCK_MAX_AGE_SEC = 15
@@ -974,7 +977,8 @@ def start_batch_update_worker(excel_lock=None):
         logging.info("Batch update worker 已經在運行中。")
         return
 
-    _excel_lock = excel_lock
+    if excel_lock is not None:   # 【2026-11-13】自動重開（冇帶鎖）時保留原本嘅 EXCEL_LOCK
+        _excel_lock = excel_lock
     logging.info("啟動 Batch update worker 背景執行緒...")
     _batch_worker_running = True
     _batch_flush_event.clear()
@@ -1084,6 +1088,17 @@ def _batch_update_worker():
         _perform_batch_update(file_name, max_attempts=3, force=True)
 
 def _perform_batch_update(file_name, max_attempts=1, force=False):
+    """同一時間只准一個寫入；force（停止 / 中斷）會等對方寫完，否則下次再試。"""
+    if not _batch_write_lock.acquire(timeout=120 if force else 5):
+        logging.warning("[BatchUpdate] 另一個 Done 批次寫入進行中，延後寫入（記憶體仍保留資料）。")
+        return False
+    try:
+        return _perform_batch_update_locked(file_name, max_attempts=max_attempts, force=force)
+    finally:
+        _batch_write_lock.release()
+
+
+def _perform_batch_update_locked(file_name, max_attempts=1, force=False):
     """
     執行批次寫入 Done 值到 Excel。
     force=True：清過期 lock、blocking 等待 EXCEL_LOCK（中斷/結束時使用）。

@@ -461,7 +461,19 @@ def _char_allowed(src_c, draft_c, ai_c):
 
 
 def _answer_text(ai):
-    """部分 model 回傳 {"draft": "..."} 之類物件而非字串，取出其中的文字。"""
+    """部分 model 回傳 {"draft": "..."} 之類物件而非字串，取出其中的文字。
+    【2026-11-13】deepseek 試過將輸入物件變成 JSON 字串原樣回覆（'{"src":"…","draft":"…"}'），
+    以前會當成 AI 建議而記錄成假嘅被拒用詞；而家先解開再取 draft 等欄位。"""
+    if isinstance(ai, str):
+        s = ai.strip()
+        if s.startswith('{') and s.endswith('}'):
+            try:
+                obj = json.loads(s)
+            except ValueError:
+                obj = None
+            if isinstance(obj, dict):
+                return _answer_text(obj)
+        return ai
     if isinstance(ai, dict):
         for k in ('result', 'output', 'corrected', 'answer', 'text', 'hk', 'draft'):
             if isinstance(ai.get(k), str):
