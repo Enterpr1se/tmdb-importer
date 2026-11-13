@@ -185,10 +185,36 @@ def _is_jk_person(data_dict):
     names = [v for k, v in (data_dict.get("all_name_translations") or {}).items()
              if v and k.split('-')[0] in ('ja', 'ko')]
     names += [a for a in (data_dict.get("also_known_as") or []) if isinstance(a, str)]
-    if is_japanese(original) or re.search(r'[가-힯]', original) or any(_looks_like_jk_name(n) for n in names):
+    if is_japanese(original) or re.search(r'[가-힯]', original):
         return True
     pob = (data_dict.get("place_of_birth") or "").lower()
-    return any(k in pob for k in ('japan', 'korea', '日本', '韓國', '韩国', '한국', '대한민국', '朝鮮'))
+    if any(k in pob for k in ('japan', 'korea', '日本', '韓國', '韩国', '한국', '대한민국', '朝鮮')):
+        return True
+    # 【2026-11-14】TMDB 已有普通中文名（例如 袁振洋）→ 日韓譯名 / 別名（원진양）只係外文寫法，唔當日韓人
+    if _plain_chinese_names(data_dict):
+        return False
+    return any(_looks_like_jk_name(n) for n in names)
+
+
+_PLAIN_CHINESE_NAME_RE = re.compile(r'[㐀-鿿]{2,4}')
+
+
+def _plain_chinese_names(data_dict):
+    """【2026-11-14】TMDB zh-HK / TW / CN / 原名入面嘅普通中文名（2–4 個漢字、冇「·」），例如 袁振洋、曾志偉。"""
+    names = [data_dict.get(k) or "" for k in ("zh_hk_name", "zh_tw_name", "zh_cn_name", "original_title_or_name")]
+    return [n.strip() for n in names if _PLAIN_CHINESE_NAME_RE.fullmatch(n.strip())]
+
+
+def _is_other_name_than_tmdb(wiki_name, data_dict):
+    """【2026-11-14】TMDB 已有普通中文名，而 wiki 名同佢哋全部都有一半以上嘅字唔同 → wiki 頁用咗另一個名
+    （法號 / 藝名 / 筆名，例如 袁振洋 嘅頁叫「釋傳般」），唔係呢個名嘅香港寫法。只差一兩個字（宋康浩 → 宋康昊）唔算。"""
+    plain = _plain_chinese_names(data_dict)
+    if not plain or not wiki_name:
+        return False
+    s2t = utils.opencc_converters.get('s2t')
+    to_t = (lambda s: s2t.convert(s)) if s2t else (lambda s: s)
+    w = set(to_t(wiki_name))
+    return not any(len(w & set(to_t(n))) * 2 >= len(n) for n in plain)
 
 
 def _has_chinese_person_name(data_dict):
@@ -464,10 +490,15 @@ async def get_api_data_for_item(client, semaphore, api_key, base_url_tmdb, endpo
             if (data_dict.get("wikidata_id") and (is_jk or _is_western_person_name(original_name, zh_tw_name, zh_cn_name))
                     and (utils.wiki_name_replaces_existing() or not is_chinese(data_dict.get("zh_hk_name") or ""))):
                 hk_by_qid = await asyncio.to_thread(lookup_hk_name_by_wikidata_queued, item_id_for_cache,
-                                                    data_dict["wikidata_id"], original_name)
+                                                    data_dict["wikidata_id"], original_name,
+                                                    [original_name, data_dict.get("en_name")],
+                                                    data_dict.get("also_known_as"))
                 if utils._PROGRAM_INTERRUPTED: return {}
                 if hk_by_qid and _is_likely_org_name(hk_by_qid):
                     logging.warning(f"Wikidata 返回的名稱 '{hk_by_qid}' 疑似公司/組織名，已棄用。")
+                elif hk_by_qid and _is_other_name_than_tmdb(hk_by_qid, data_dict):
+                    logging.info(f"Wikidata 中文維基頁名 '{hk_by_qid}' 同 TMDB 中文名 {_plain_chinese_names(data_dict)} 唔係同一個名"
+                                 f"（可能係法號 / 藝名），唔用。")
                 elif hk_by_qid:
                     data_dict['wiki_zh_hk_name'] = hk_by_qid
             if data_dict.get("wiki_zh_hk_name"):
@@ -1299,6 +1330,13 @@ def _bio_protect_names(api_data, name_candidate, alias=None):
     sources = [api_data.get("zh_cn_name"), api_data.get("zh_tw_name"), api_data.get("zh_hk_name"),
                api_data.get("original_title_or_name"), alias, name_candidate]
     names = {s: name_candidate for s in sources if isinstance(s, str) and len(s) >= 2 and is_chinese(s)}
+    # 【2026-11-13】連名 / 姓（≥2 字）都保護，例如「克鲁斯」→「告魯斯」：唔使行 OpenCC / AI，
+    # 慳 token，亦唔會因為佢自己個名出假被拒用詞。結果同之後 _replace_name_parts 換名一樣。
+    # 舊部份係新部份其中一截（例如 李維 → 李維斯）就唔保護，交返 _replace_name_parts 處理。
+    s2t = utils.opencc_converters.get('s2t')
+    for o, n in _name_part_pairs(sources, name_candidate).items():
+        if o not in n and (s2t is None or s2t.convert(o) not in n):
+            names.setdefault(o, n)
     return names or None
 
 
@@ -1306,14 +1344,11 @@ _NAME_SEP_RE = re.compile(r'[·・•‧]')
 _BIO_TITLE_RE = re.compile(r'《[^》]*》|〈[^〉]*〉')
 
 
-def _replace_name_parts(bio, old_names, new_name):
-    """【2026-11】將簡介入面舊名嘅「部份」（名或姓）換成新名對應部份。回傳 (簡介, 有冇換)。
-    - 新舊名用「·」分開；部份數目一樣就逐部份對應，唔一樣就只對應最後一部份（姓）。
-    - 只換 ≥2 字嘅部份（單字太易誤中）；《》〈〉作品名同已經係新全名嘅位置唔會改。
-    例如 舊「讓·雷諾」→ 新「尚·連奴」：「雷諾憑《這個殺手不太冷》成名」→「連奴憑《這個殺手不太冷》成名」。"""
+def _name_part_pairs(old_names, new_name):
+    """舊名「部份」→ 新名對應部份 {舊: 新}（用「·」分開；數目一樣逐部份對應，唔一樣只對應姓；只取 ≥2 字）。"""
     new_parts = [p for p in _NAME_SEP_RE.split(new_name or '') if p]
-    if not bio or len(new_parts) < 2:
-        return bio, False
+    if len(new_parts) < 2:
+        return {}
     pairs = {}
     for old in old_names or ():
         old_parts = [p for p in _NAME_SEP_RE.split(old or '') if p]
@@ -1323,6 +1358,17 @@ def _replace_name_parts(bio, old_names, new_name):
         for o, n in cand:
             if len(o) >= 2 and o != n and is_chinese(o):
                 pairs.setdefault(o, n)
+    return pairs
+
+
+def _replace_name_parts(bio, old_names, new_name):
+    """【2026-11】將簡介入面舊名嘅「部份」（名或姓）換成新名對應部份。回傳 (簡介, 有冇換)。
+    - 新舊名用「·」分開；部份數目一樣就逐部份對應，唔一樣就只對應最後一部份（姓）。
+    - 只換 ≥2 字嘅部份（單字太易誤中）；《》〈〉作品名同已經係新全名嘅位置唔會改。
+    例如 舊「讓·雷諾」→ 新「尚·連奴」：「雷諾憑《這個殺手不太冷》成名」→「連奴憑《這個殺手不太冷》成名」。"""
+    if not bio:
+        return bio, False
+    pairs = _name_part_pairs(old_names, new_name)
     if not pairs:
         return bio, False
 

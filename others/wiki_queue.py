@@ -109,7 +109,7 @@ def search_wiki_for_hk_name_queued(item_id, original_name, media_type, year=None
     })
 
 
-def lookup_hk_name_by_wikidata_queued(item_id, wikidata_id, original_name=None):
+def lookup_hk_name_by_wikidata_queued(item_id, wikidata_id, original_name=None, tmdb_names=None, also_known_as=None):
     """【2026-11】經隊列執行 wiki_search.lookup_hk_name_by_wikidata；快取命中唔使排隊。"""
     from others.wiki_search import _init_db, _wikidata_cache_lookup, lookup_hk_name_by_wikidata
     _init_db()
@@ -117,7 +117,7 @@ def lookup_hk_name_by_wikidata_queued(item_id, wikidata_id, original_name=None):
         cached, need_query = _wikidata_cache_lookup(item_id)
         if cached or not need_query:
             return cached
-    return _run_queued(lookup_hk_name_by_wikidata, (item_id, wikidata_id, original_name), {})
+    return _run_queued(lookup_hk_name_by_wikidata, (item_id, wikidata_id, original_name, tmdb_names, also_known_as), {})
 
 
 def lookup_ja_kanji_name_by_wikidata_queued(item_id, wikidata_id, original_name=None):

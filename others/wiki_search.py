@@ -1194,8 +1194,28 @@ def _wiki_api_get(url, params):
     return r.json()
 
 
-def lookup_hk_name_by_wikidata(item_id, wikidata_id, original_name=None):
-    """用 Wikidata ID 搵人物嘅中文維基 zh-hk 譯名。搵唔到或出錯回傳 None。"""
+def _person_name_key(name):
+    """比較英文人名用：去括號註解、重音、大小寫同標點，詞序唔理（Kimura Takuya = Takuya Kimura）。"""
+    import unicodedata
+    s = re.sub(r'\s*\([^)]*\)', '', str(name or ''))
+    s = ''.join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c)).casefold()
+    return tuple(sorted(re.findall(r'\w+', s)))
+
+
+def _is_stage_name_page(enwiki_title, tmdb_names, also_known_as):
+    """【2026-11-14】英文維基頁名唔係 TMDB 個名，但係 TMDB 別名之一 → 維基頁用藝名 / 擂台名做標題
+    （例如 Mark Calaway 嘅頁叫「The Undertaker」，中文頁「送葬者 (摔角手)」），中文頁名唔係 TMDB 呢個名嘅譯名。"""
+    page = _person_name_key(enwiki_title)
+    if not page:
+        return False
+    if any(page == _person_name_key(n) for n in tmdb_names or () if n):
+        return False
+    return any(page == _person_name_key(a) for a in also_known_as or () if isinstance(a, str))
+
+
+def lookup_hk_name_by_wikidata(item_id, wikidata_id, original_name=None, tmdb_names=None, also_known_as=None):
+    """用 Wikidata ID 搵人物嘅中文維基 zh-hk 譯名。搵唔到或出錯回傳 None。
+    tmdb_names（TMDB 原名 / 英文名）同 also_known_as 用嚟認出藝名頁（見 _is_stage_name_page），藝名頁當搵唔到。"""
     _reset_rate_limit_flag()
     _init_db()
     if not wikidata_id or not re.fullmatch(r'Q\d+', str(wikidata_id)):
@@ -1207,13 +1227,18 @@ def lookup_hk_name_by_wikidata(item_id, wikidata_id, original_name=None):
     try:
         j = _wiki_api_get('https://www.wikidata.org/w/api.php', {
             'action': 'wbgetentities', 'ids': wikidata_id, 'props': 'sitelinks',
-            'sitefilter': 'zhwiki|zh_yuewiki', 'format': 'json'})
+            'sitefilter': 'zhwiki|zh_yuewiki|enwiki', 'format': 'json'})
         if j is None:
             return None
         links = j.get('entities', {}).get(wikidata_id, {}).get('sitelinks', {})
         zh_title = links.get('zhwiki', {}).get('title')
         yue_title = links.get('zh_yuewiki', {}).get('title')
+        en_title = links.get('enwiki', {}).get('title')
         hk_name = None
+        if zh_title and en_title and _is_stage_name_page(en_title, tmdb_names or [original_name], also_known_as):
+            logging.info(f"[Wikidata] '{original_name}' ({wikidata_id}) 維基頁用藝名「{en_title}」/「{zh_title}」做標題，"
+                         f"唔係 TMDB 呢個名嘅譯名，唔用。")
+            zh_title = yue_title = None
         if zh_title:
             j = _wiki_api_get('https://zh.wikipedia.org/w/api.php', {
                 'action': 'parse', 'page': zh_title, 'prop': 'displaytitle', 'variant': 'zh-hk',
