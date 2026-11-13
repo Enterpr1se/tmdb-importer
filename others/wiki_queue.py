@@ -9,7 +9,8 @@ _start_lock = threading.Lock()
 
 # Adaptive delay: shrinks when requests succeed, grows on 429.
 _current_delay = 5.0
-_MIN_DELAY = 3.0   # floor — enough spacing to be polite
+_MIN_DELAY = 3.0   # floor — enough spacing to be polite（名稱搜尋：每次幾十個請求）
+_MIN_DELAY_WIKIDATA = 1.0  # 【2026-11-13】Wikidata ID 查詢每次只有 1–2 個請求，最少延遲 1 秒（用家批准）
 _MAX_DELAY = 60.0  # ceiling — hit when repeated 429s occur
 MAX_SEARCH_SECONDS = 300  # 單次搜索最長允許 5 分鐘，超時放棄並繼續下一個
 
@@ -55,7 +56,9 @@ def _worker():
             _current_delay = min(_current_delay * 2.0, _MAX_DELAY)
             log.info("[WikiQueue] 偵測到限速 (429)，延長下次延遲至 %.0fs。", _current_delay)
         else:
-            _current_delay = max(_current_delay * 0.75, _MIN_DELAY)
+            # 【2026-11-13】最少延遲按啱啱做完嘅請求類型：Wikidata ID 查詢 1 秒，名稱搜尋 3 秒
+            floor = _MIN_DELAY_WIKIDATA if getattr(func, '_wiki_light_request', False) else _MIN_DELAY
+            _current_delay = max(_current_delay * 0.75, floor)
             log.debug("[WikiQueue] 搜索順暢，縮短下次延遲至 %.1fs。", _current_delay)
 
         # Wait in 1s chunks so Ctrl+C responds immediately

@@ -1929,6 +1929,14 @@ def main(mode='single', overwrite_titles='ask', overwrite_descriptions='ask', cl
     # 【修改】傳遞 utils 中的中斷狀態
     utils.set_utils_interrupt_callback(lambda: utils._PROGRAM_INTERRUPTED)
     utils.clear_pause_flag()
+    # 【2026-11-13】Bangumi token 到期前 30 日起每次運行都提醒（監控面板問題分頁會見到 WARNING）
+    try:
+        from others.bangumi_token import token_expiry_message
+        _bgm_msg = token_expiry_message()
+        if _bgm_msg:
+            log.warning(f"[Bangumi] {_bgm_msg}")
+    except Exception as e:
+        log.debug(f"檢查 Bangumi token 到期日失敗: {e}")
 
     # 【2026-11 N1】來源無資料時：n（預設）= 保留 TMDB 內容（簡體轉繁體）；y = 覆蓋設為 y 時清空 TMDB 欄位
     utils.CLEAR_TMDB_WHEN_SOURCE_EMPTY = str(clear_when_source_empty or 'n').strip().lower().startswith('y')

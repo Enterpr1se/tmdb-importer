@@ -1313,3 +1313,8 @@ def lookup_ja_kanji_name_by_wikidata(item_id, wikidata_id, original_name=None):
                             original_name, None)
     return kanji
 
+
+# 【2026-11-13】wiki_queue：呢兩個函數每次只有 1–2 個請求，最少延遲用 1 秒（名稱搜尋保持 3 秒）
+lookup_hk_name_by_wikidata._wiki_light_request = True
+lookup_ja_kanji_name_by_wikidata._wiki_light_request = True
+

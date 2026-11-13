@@ -274,6 +274,16 @@ def main():
     【修改】採用了基於動態建立設定檔的 OpenCC 初始化流程。
     """
     pre_run_check()
+    # 【2026-11-13】Bangumi token 到期前 30 日起每次啟動都提醒（tmdb_importer.main 亦會寫入 log）
+    try:
+        from others.bangumi_token import token_expiry_message
+        _bgm_msg = token_expiry_message()
+        if _bgm_msg:
+            print("=" * 80)
+            print(f"【提醒】{_bgm_msg}")
+            print("=" * 80)
+    except Exception:
+        pass
     try:
         check_dependencies()
     except Exception as e:

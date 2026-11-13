@@ -774,6 +774,18 @@ class MonitorApp:
         root.protocol('WM_DELETE_WINDOW', self.close)
         self.root.after(200, self._drain)
         self.root.after(1000, self._tick)
+        self.root.after(1500, self._check_bangumi_token)
+
+    def _check_bangumi_token(self):
+        """【2026-11-13】Bangumi token 到期前 30 日起，每次開監控面板都彈出提醒。"""
+        try:
+            from others.bangumi_token import token_expiry_message
+            msg = token_expiry_message(os.path.join(self.base, 'configs.json'))
+        except Exception:
+            return
+        if msg:
+            from tkinter import messagebox
+            messagebox.showwarning('TMDB 監控面板：Bangumi token', msg, parent=self.root)
 
     # ---------------- 外觀
     def _setup_style(self):
