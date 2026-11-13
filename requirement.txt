@@ -1,0 +1,20 @@
+程式最後只寫入了 people 數個人，但 tv show title 並沒有寫入，而 people 亦看不到 tmdb_uploader 有上載。
+movie / tv show / episode / season 等, title 能接受中文和英文. 而有優先次序，中文 --> 英文 --> 其他語言
+假設覆蓋為 n, 而泛用型標題當作空
+如果 title , zh-HK 為非中文，就抓取 zh-TW, 如果 zh-TW 為非中文，就抓取 zh-CN, 如果 zh-CN 也是非中文，就看 zh-HK / zh-TW / zh-CN 是否英文，是英文的話就看 description 是否為空, 如果 description 為空的話，就不是寫入 excel
+如果 zh-HK 為中文但是簡體字的話, 就將 title 變為繁體, 寫入 excel.
+如果 zh-HK 已經有繁體中文資料，則在 excel 內設定為空。
+description 部份，基本上和 title 同樣處理, 但兩者獨立處理
+最後如果 title 和 description , 時長同樣為空, 就跳過不寫入 excel.
+如果 title 為英文，但有 description 的話, 都將兩者寫入 excel.
+如果 zh-TW / zh-CN title 為英文，而 zh-HK 為中文而且和 zh-TW / zh-CN 一樣的話，這情況 description 為空，但如果 title 是非中文或英文, 都會寫入英文 title.
+如果 title / description / 時長, 任何一樣需要改動, 都將那一項寫入 excel.
+如果 title / description / 時長, 任何一樣 zh-HK 一模一樣, 就不寫入 excel.
+tv / movie / episode / season 同樣處理.
+不過，如果 tv show / movie 的 title 是非中文，即是指英文或其他語言，而 description 為空或也是非中文的話，這樣就跳過更新，並設定 done 值為 1, 在 unavailable_video.xlsx 中的 no_chinese_content 加入該 URL.
+
+而人物方面, 人名只接受中文，如果 zh-HK 為空或非中文的話，就尋找 zh-TW / zh-CN (繁體化)的資料，如果人物已經是繁體中文的話，則放棄寫入 excel.
+人物 bio 亦一樣，如果是空的話，就尋找 zh-TW / zh-CN (繁體化)的資料, 如果已經是繁體中文的話，則放棄寫入 excel.
+如果zh-HK / zh-TW / zh-CN 都是空的話，就放棄寫入。
+如果人名或人物 bio 任何一樣有資料，就將那一項寫入 excel 而互不影響，沒有資料那一方就留空
+如果人名和人物 bio 同時沒有資料或已經是繁體資料，則放棄寫入。

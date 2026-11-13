@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Project-specific sensitive / generated files
+configs.json
+ai_config.json
+_temp_vpn_auth.txt
+*.log
+log/
+tmp/
+temp/
+.tmp.driveupload/
+tmdb_scan_progress.json
+
+# Data & output files (large / sensitive)
+data/
+*.xlsx
+*.xls
+*.csv
+actors.txt
+
+# Browser automation artifacts (cookies, profiles, sessions)
+browser_profile*/
+browserdrive/
+.claude/
+
+# OpenCC / language data
+opencc_data/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Windows / system
+*.lnk
+*.tmp
+*.bak
+$Recycle.Bin/
+System Volume Information/
+_backup_*/
+monitor_settings.json
+
+# Old code and personal output lists (never upload)
+_archive/
+sub-program/*.txt
+
+# Personal tools made with other AIs (keep locally, never upload)
+compare_opencc.ps1
+opencc_comparison/

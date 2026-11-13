@@ -1,0 +1,5 @@
+{
+    "_說明": "複製成 configs.json，填 tmdb_api（TMDB API Read Access Token，v4，eyJ 開頭）。留空就改用較慢嘅瀏覽器方式讀取 TMDB。",
+    "_帳號密碼": "唔使喺度填。程式第一次用到 TMDB / Netflix / Disney+ 時會問，揀 y 就會自動寫入呢個檔案（tmdb_username、tmdb_password、netflix_username、netflix_password、disneyplus_email、disneyplus_password）。唔好加空白嘅帳號項目，空字串會被當成已填。",
+    "tmdb_api": ""
+}
