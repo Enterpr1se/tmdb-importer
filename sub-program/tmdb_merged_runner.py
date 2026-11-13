@@ -22,6 +22,8 @@ from datetime import datetime
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bulk_txt import write_urls_txt, output_path  # sub-program 共用：輸出到 txt，唔直接改 bulk_videos.xlsx
 
 # ==========================================
 # 全域設定與常數
@@ -59,14 +61,16 @@ print(f"[Init] 專案根目錄: {project_root}")
 print(f"[Init] 設定檔路徑: {config_file_path}")
 
 DB_FILE_PATH = os.path.join(project_root, 'data', 'scan_history.db')
-EXCEL_FILE_PATH = os.path.join(project_root, 'data', 'bulk_videos.xlsx')
+# 搵到嘅網址輸出到 sub-program/tmdb_merged_runner_urls.txt（見 bulk_txt.py），唔直接改 bulk_videos.xlsx
+MISSAV_NAMES_FILE = None   # main() 設定：MissAV 書籤小程式下載嘅名單
+MISSAV_SEARCHED_FILE = os.path.join(project_root, 'data', 'missav_searched_names.txt')
 
 VIDEO_TO_PERSON_TABLE = 'videos_to_people_history'
 VIDEO_TO_PERSON_RETENTION = 30
 PERSON_TO_VIDEO_TABLE = 'people_to_videos_history'
 PERSON_TO_VIDEO_RETENTION = 60
 CHINESE_CHECK_TABLE = 'chinese_check_history'
-CHINESE_CHECK_RETENTION = 120
+CHINESE_CHECK_RETENTION = 365  # 365 天（同 bulk_video_person.py 一致；兩個共用 scan_history.db，清理時用短嘅會刪走另一個嘅紀錄）
 
 MAX_CONCURRENT_REQUESTS = 20
 TMDB_API_BASE_URL = "https://api.themoviedb.org/3"
@@ -214,99 +218,12 @@ def display_progress(step_name, current, total, start_time):
     sys.stdout.flush()
 
 def write_to_excel(valid_urls):
+    """搵到嘅網址寫入 txt（名稱保留係為咗唔使改 call site）。"""
     if not valid_urls:
         return
-
-    with excel_lock:
-        output_dir = os.path.dirname(EXCEL_FILE_PATH)
-        if output_dir: os.makedirs(output_dir, exist_ok=True)
-        
-        lock_file = EXCEL_FILE_PATH + ".lock"
-        
-        while True:
-            try:
-                fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
-                break
-            except FileExistsError:
-                time.sleep(1)
-            except Exception as e:
-                logging.error(f"[Excel] 無法建立鎖定檔案: {e}")
-                return
-
-        try:
-            required_sheets = {'Bulk': ['Video URL', 'TMDB URL', 'Split', 'Done', '覆蓋劇集標題', '覆蓋劇集描述', '覆蓋分集標題', '覆蓋分集描述', '來源無資料時清空TMDB', '維基人名取代現有']}
-            write_successful = False
-            permission_error_logged = False
-            
-            while not write_successful:
-                try:
-                    if not os.path.exists(EXCEL_FILE_PATH):
-                        with pd.ExcelWriter(EXCEL_FILE_PATH, engine='openpyxl') as writer:
-                            for sheet, cols in required_sheets.items():
-                                pd.DataFrame(columns=cols).to_excel(writer, sheet_name=sheet, index=False)
-
-                    try:
-                        existing_df = pd.read_excel(EXCEL_FILE_PATH, sheet_name='Bulk', engine='openpyxl')
-                    except:
-                        existing_df = pd.DataFrame(columns=required_sheets['Bulk'])
-
-                    if 'Done' not in existing_df.columns: existing_df['Done'] = ''
-                    
-                    existing_map = {}
-                    for idx, u in zip(existing_df.index, existing_df['Video URL']):
-                        if pd.notna(u):
-                            existing_map[normalize_tmdb_url(str(u))] = idx
-
-                    new_rows = []
-                    updated_count = 0
-                    
-                    for url in valid_urls:
-                        norm = normalize_tmdb_url(url)
-                        if norm in existing_map:
-                            idx = existing_map[norm]
-                            if pd.notna(existing_df.at[idx, 'Done']):
-                                existing_df.at[idx, 'Done'] = None
-                                updated_count += 1
-                        else:
-                            new_rows.append({'Video URL': url, 'TMDB URL': '', 'Split': '', 'Done': None})
-
-                    should_save = False
-                    if new_rows:
-                        new_df = pd.DataFrame(new_rows)
-                        existing_df = pd.concat([existing_df, new_df], ignore_index=True)
-                        should_save = True
-                    
-                    if updated_count > 0:
-                        should_save = True
-
-                    if should_save:
-                        with pd.ExcelWriter(EXCEL_FILE_PATH, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-                            existing_df.to_excel(writer, sheet_name='Bulk', index=False)
-                        
-                        with stats_lock:
-                            session_stats['added'] += len(new_rows)
-                            session_stats['updated'] += updated_count
-                            
-                        logging.info(f"[Excel] 寫入成功：新增 {len(new_rows)} 筆，重置狀態 {updated_count} 筆。")
-                    else:
-                        logging.info(f"[Excel] 資料已是最新，無需變更。")
-                    
-                    write_successful = True
-
-                except PermissionError:
-                    if not permission_error_logged:
-                        logging.warning(f"[Excel] ⚠️ 無法寫入檔案 (可能被開啟)，正在等待釋放...")
-                        permission_error_logged = True
-                    time.sleep(2)
-                except Exception as e:
-                    logging.error(f"[Excel] 寫入時發生錯誤: {e}")
-                    break
-
-        finally:
-            if os.path.exists(lock_file):
-                try: os.remove(lock_file)
-                except: pass
+    _, added = write_urls_txt(valid_urls, 'tmdb_merged_runner')
+    with stats_lock:
+        session_stats['added'] += added
 
 # --- [修改] 自動切換 OpenVPN 函式 ---
 
@@ -805,7 +722,40 @@ class JavHdScraper:
             page_num += 1
             time.sleep(random.uniform(1.0, 2.0))
 
-def search_people_tmdb(page, names):
+def load_missav_names(path):
+    """讀 MissAV 書籤小程式（missav_bookmarklet.html）下載嘅 missav_names.txt；
+    略過以前已經搜尋過嘅名（記錄喺 data/missav_searched_names.txt）。"""
+    try:
+        with open(path, encoding='utf-8-sig') as f:
+            names = list(dict.fromkeys(line.strip() for line in f if line.strip()))
+    except OSError as e:
+        logging.error(f"[Scraper] 讀取 MissAV 名單失敗: {e}")
+        return []
+    searched = set()
+    if os.path.exists(MISSAV_SEARCHED_FILE):
+        with open(MISSAV_SEARCHED_FILE, encoding='utf-8') as f:
+            searched = {line.strip() for line in f if line.strip()}
+    todo = [n for n in names if n not in searched]
+    logging.info(f"[Scraper] MissAV 名單 {len(names)} 個名，其中 {len(names) - len(todo)} 個以前搜尋過，今次搜尋 {len(todo)} 個。")
+    return todo
+
+
+def mark_missav_searched(name):
+    try:
+        os.makedirs(os.path.dirname(MISSAV_SEARCHED_FILE), exist_ok=True)
+        with open(MISSAV_SEARCHED_FILE, 'a', encoding='utf-8') as f:
+            f.write(name + '\n')
+    except OSError:
+        pass
+
+
+def find_latest_missav_file():
+    downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
+    files = glob.glob(os.path.join(downloads, 'missav_names*.txt'))
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def search_people_tmdb(page, names, on_searched=None):
     logging.info(f"[Scraper] 正在 TMDB 搜尋 {len(names)} 位人物...")
     for name in names:
         if stop_event.is_set(): break 
@@ -819,6 +769,7 @@ def search_people_tmdb(page, names):
                 if href and '/person/' in href: 
                     links.add("https://www.themoviedb.org" + href)
             process_found_links(links, f"搜尋:{name}")
+            if on_searched: on_searched(name)
         time.sleep(random.uniform(1.5, 3.0))
 
 def fetch_homepage_content_full(page):
@@ -888,6 +839,7 @@ def run_scraper_thread(configs, input_lines, target_pages_list, fetch_all_pages)
             if p in ['1', 'homepage']: tasks.add('homepage')
             elif p in ['2', 'leaderboard']: tasks.add('leaderboard')
             elif p in ['3', 'javhd']: tasks.add('javhd')
+            elif p.lower() in ['4', 'missav']: tasks.add('missav')
             elif '/u/' in p: usernames.add(p.split('/u/')[1].split('/')[0].split('?')[0])
             else: usernames.add(p)
 
@@ -912,6 +864,10 @@ def run_scraper_thread(configs, input_lines, target_pages_list, fetch_all_pages)
             jav = JavHdScraper(page)
             names = jav.scrape()
             if names: search_people_tmdb(page, names)
+
+        if 'missav' in tasks and not stop_event.is_set() and MISSAV_NAMES_FILE:
+            names = load_missav_names(MISSAV_NAMES_FILE)
+            if names: search_people_tmdb(page, names, on_searched=mark_missav_searched)
 
         if 'homepage' in tasks and not stop_event.is_set():
             fetch_homepage_content_full(page)
@@ -1297,6 +1253,7 @@ def main():
     print(" - '1' 或 'homepage': 首頁 (Homepage)")
     print(" - '2' 或 'leaderboard': 排行榜 (Leaderboard)")
     print(" - '3' 或 'javhd': JAVHD")
+    print(" - '4' 或 'missav': MissAV（讀 missav_bookmarklet.html 書籤小程式下載嘅 missav_names.txt）")
     print(" - 使用者名稱")
     print(" - 直接按 Enter 開始執行")
     
@@ -1308,6 +1265,16 @@ def main():
     
     if not input_lines: return
 
+    global MISSAV_NAMES_FILE
+    if any(t.strip().lower() in ('4', 'missav') for line in input_lines for t in re.split(r'[,\s]+', line)):
+        latest = find_latest_missav_file()
+        hint = f"Enter = {latest}" if latest else "下載資料夾冇 missav_names*.txt"
+        path = input(f"\nMissAV 名單 txt 路徑（{hint}）: ").strip().strip('"')
+        MISSAV_NAMES_FILE = path or latest
+        if not MISSAV_NAMES_FILE or not os.path.exists(MISSAV_NAMES_FILE):
+            print("❌ 搵唔到 MissAV 名單，略過 MissAV。請先用 sub-program/missav_bookmarklet.html 下載名單。")
+            MISSAV_NAMES_FILE = None
+
     needs_user_scan = False
     all_tokens = []
     for line in input_lines:
@@ -1318,7 +1285,7 @@ def main():
 
     for token in all_tokens:
         t_low = token.lower()
-        if t_low in ['1', 'homepage', '3', 'javhd']:
+        if t_low in ['1', 'homepage', '3', 'javhd', '4', 'missav']:
             continue
         if t_low in ['2', 'leaderboard']:
             needs_user_scan = True
@@ -1355,7 +1322,7 @@ def main():
         stop_event.set()
     
     # 一次性寫入
-    print("\n=== 正在寫入 Excel (一次性) ===")
+    print("\n=== 正在寫入結果 txt (一次性) ===")
     if all_valid_urls:
         write_to_excel(list(set(all_valid_urls))) # 去除重複後寫入
     else:
@@ -1363,8 +1330,7 @@ def main():
 
     print("\n=== Session Summary ===")
     print(f"Total Added: {session_stats['added']}")
-    print(f"Total Updated: {session_stats['updated']}")
-    print(f"Excel 檔案位置: {os.path.abspath(EXCEL_FILE_PATH)}")
+    print(f"結果檔案位置: {output_path('tmdb_merged_runner')}")
     
     # 最後執行 DB 清理與壓縮
     cleanup_and_optimize_db(vacuum=True)

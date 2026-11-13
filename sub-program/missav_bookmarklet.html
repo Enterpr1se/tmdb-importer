@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MissAV 名單收集</title>
+<style>
+  :root { --bg: #fafafa; --fg: #222; --muted: #666; --accent: #0b6bcb; --box: #fff; --line: #ddd; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1b; --fg: #eee; --muted: #aaa; --accent: #5aa9ff; --box: #262626; --line: #444; }
+  }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, "Microsoft JhengHei", sans-serif; margin: 0; padding: 24px 16px; }
+  main { max-width: 760px; margin: 0 auto; }
+  a.bm { display: inline-block; padding: 10px 18px; border-radius: 8px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+  button { font: inherit; padding: 6px 14px; }
+  ol li { margin: 4px 0; }
+  .muted { color: var(--muted); font-size: 14px; }
+  code { background: var(--box); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<main>
+<h1>MissAV 名單收集（書籤小程式）</h1>
+<p>喺你平時用嘅瀏覽器收集 MissAV 女優名，下載成 <code>missav_names.txt</code>，再交畀 <code>tmdb_merged_runner.py</code>（選項 4）搜尋 TMDB。</p>
+
+<h2>安裝</h2>
+<p>將下面個掣拖去書籤列：</p>
+<p><a class="bm" id="bm" href="#">MissAV 收集名單</a> <button id="copy">複製書籤網址</button> <span id="copied" class="muted"></span></p>
+<p class="muted">拖唔到嘅話：撳「複製書籤網址」，新增一個書籤，網址欄貼上。</p>
+
+<h2>使用</h2>
+<ol>
+  <li>開 MissAV 任何一頁（例如女優列表），如有 Cloudflare 驗證就正常完成。</li>
+  <li>撳書籤，右下角會出現控制面板。揀每個分類最多幾多頁（0 = 全部），撳「開始」。</li>
+  <li>程式會逐頁讀取「最新出道、最高人氣、最多收藏」三個分類，每頁之間停 1.5–3 秒。</li>
+  <li>完成後自動下載 <code>missav_names.txt</code>。中途都可以撳「下載」攞已收集嘅名字。</li>
+  <li>如果中途遇到驗證：重新載入頁面完成驗證，再撳書籤、撳「開始」，會由停低嗰頁繼續。</li>
+</ol>
+<p class="muted">進度存喺呢個瀏覽器（localStorage），撳「清除進度」先會由頭開始。</p>
+</main>
+
+<script type="text/plain" id="src">
+(() => {
+  if (window.__missavCollector) { window.__missavCollector.show(); return; }
+  const KEY = 'missavNameCollector.v1';
+  const CHALLENGE = /請稍候|请稍候|just a moment|しばらくお待ちください|attention required/i;
+  const origin = /missav/i.test(location.hostname) ? location.origin : 'https://missav.ws';
+  const CATS = [
+    ['最新出道', origin + '/ja/actresses'],
+    ['最高人氣', origin + '/ja/actresses?sort=views'],
+    ['最多收藏', origin + '/ja/actresses?sort=saved'],
+  ];
+  const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || null; } catch (e) { return null; } };
+  const fresh = () => ({ names: [], cats: CATS.map(([label, url]) => ({ label, next: url, pages: 0 })), maxPages: 0 });
+  let st = load() || fresh();
+  const names = new Set(st.names);
+  const save = () => { st.names = [...names]; try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) {} };
+  let running = false, stopFlag = false;
+
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#fff;color:#222;border:1px solid #888;border-radius:8px;padding:12px;font:14px/1.5 system-ui,"Microsoft JhengHei",sans-serif;width:320px;box-shadow:0 4px 16px rgba(0,0,0,.3)';
+  box.innerHTML = '<b>MissAV 名單收集</b> <a href="#" data-a="close" style="float:right;color:#666">✕</a>'
+    + '<div style="margin:6px 0">每個分類最多頁數（0 = 全部）：<input data-a="max" type="number" min="0" style="width:60px"></div>'
+    + '<div data-a="status" style="margin:6px 0;white-space:pre-wrap"></div>'
+    + '<button data-a="start">開始</button> <button data-a="stop">停止</button> <button data-a="dl">下載</button> <button data-a="reset">清除進度</button>';
+  document.body.appendChild(box);
+  const $ = a => box.querySelector('[data-a="' + a + '"]');
+  $('max').value = st.maxPages || 0;
+
+  const status = msg => {
+    const done = st.cats.filter(c => !c.next).length;
+    $('status').textContent = '名字：' + names.size + '　分類完成：' + done + '/' + st.cats.length
+      + '\n' + st.cats.map(c => c.label + '：' + c.pages + ' 頁' + (c.next ? '' : ' ✓')).join('　') + (msg ? '\n' + msg : '');
+  };
+  const download = () => {
+    const blob = new Blob([[...names].join('\n') + '\n'], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'missav_names.txt';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  async function run() {
+    if (running) return;
+    running = true; stopFlag = false;
+    st.maxPages = Math.max(0, parseInt($('max').value, 10) || 0); save();
+    try {
+      for (const c of st.cats) {
+        while (c.next && !stopFlag) {
+          if (st.maxPages && c.pages >= st.maxPages) { c.next = null; save(); break; }
+          status('讀取中：' + c.label + ' 第 ' + (c.pages + 1) + ' 頁');
+          let html, res;
+          try {
+            res = await fetch(c.next, { credentials: 'include' });
+            html = await res.text();
+          } catch (e) { status('網絡錯誤：' + e + '\n撳「開始」再試。'); return; }
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          const found = [...doc.querySelectorAll('h4.text-nord13.truncate')].map(h => h.textContent.trim()).filter(Boolean);
+          if (!found.length) {
+            if (CHALLENGE.test(doc.title) || res.status === 403 || res.status === 503) {
+              status('遇到 Cloudflare 驗證（HTTP ' + res.status + '）。\n請重新載入頁面完成驗證，再撳書籤 →「開始」繼續。'); return;
+            }
+            c.next = null; save(); break;
+          }
+          found.forEach(n => names.add(n));
+          c.pages++;
+          const nx = doc.querySelector('a[rel="next"]');
+          c.next = nx && nx.getAttribute('href') ? new URL(nx.getAttribute('href'), c.next).href : null;
+          save();
+          await sleep(1500 + Math.random() * 1500);
+        }
+        if (stopFlag) break;
+      }
+      if (stopFlag) { status('已停止。撳「開始」可以繼續。'); return; }
+      status('完成！已下載 missav_names.txt。');
+      download();
+    } finally { running = false; }
+  }
+
+  box.addEventListener('click', e => {
+    const a = e.target.getAttribute('data-a'); if (!a) return; e.preventDefault();
+    if (a === 'start') run();
+    else if (a === 'stop') { stopFlag = true; status('停止中…'); }
+    else if (a === 'dl') download();
+    else if (a === 'reset') { if (running) return; st = fresh(); names.clear(); save(); $('max').value = 0; status('已清除進度。'); }
+    else if (a === 'close') { box.style.display = 'none'; }
+  });
+  window.__missavCollector = { show: () => { box.style.display = ''; status(); } };
+  status(st.names.length ? '有之前嘅進度，撳「開始」繼續。' : '撳「開始」開始收集。');
+})();
+</script>
+<script>
+  const code = document.getElementById('src').textContent.trim();
+  const url = 'javascript:' + encodeURIComponent(code);
+  document.getElementById('bm').href = url;
+  document.getElementById('copy').onclick = async () => {
+    try { await navigator.clipboard.writeText(url); document.getElementById('copied').textContent = '已複製'; }
+    catch (e) { document.getElementById('copied').textContent = '複製失敗，請用拖拉方法'; }
+  };
+</script>
+</body>
+</html>

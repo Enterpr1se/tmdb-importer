@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 import pandas as pd
 import time # (新增) 為了 time.sleep
 import traceback # (新增) 為了記錄詳細錯誤
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bulk_txt import write_urls_txt  # sub-program 共用：輸出到 txt，唔直接改 bulk_videos.xlsx
 
 # 設置日誌
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -83,61 +85,6 @@ def check_page_format(soup, url):
             
     logging.warning(f"頁面 {url} - check_page_format: 未找到包含任何目標標題關鍵字的表格。")
     return False
-
-def check_create_bulk_excel(file_name, sheet_name='Bulk'):
-    """檢查並創建 bulk_videos.xlsx，僅包含 Bulk 表"""
-    output_dir = os.path.dirname(file_name)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    
-    required_sheets = {
-        sheet_name: ['Video URL', 'TMDB URL', 'Split', 'Done', '覆蓋劇集標題', '覆蓋劇集描述', '覆蓋分集標題', '覆蓋分集描述', '來源無資料時清空TMDB', '維基人名取代現有']
-    }
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            if not os.path.exists(file_name):
-                with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-                    for sheet, columns in required_sheets.items():
-                        pd.DataFrame(columns=columns).to_excel(writer, sheet_name=sheet, index=False)
-                logging.info(f"已創建新的 {file_name}，包含工作表: {list(required_sheets.keys())}")
-            else:
-                # 檢查 sheet 是否存在
-                try:
-                    all_sheets = pd.read_excel(file_name, sheet_name=None, engine='openpyxl')
-                except FileNotFoundError:
-                    # 另一種情況下的文件不存在
-                    all_sheets = {}
-
-                if sheet_name not in all_sheets:
-                     with pd.ExcelWriter(file_name, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
-                        pd.DataFrame(columns=required_sheets[sheet_name]).to_excel(writer, sheet_name=sheet_name, index=False)
-                     logging.info(f"工作表 {sheet_name} 不存在於 {file_name}，已創建")
-                else:
-                    # 檢查欄位是否存在
-                    df = all_sheets[sheet_name]
-                    needs_update = False
-                    for col in required_sheets[sheet_name]:
-                        if col not in df.columns:
-                            df[col] = ''
-                            needs_update = True
-                    
-                    if needs_update:
-                        with pd.ExcelWriter(file_name, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-                            df.to_excel(writer, sheet_name=sheet_name, index=False)
-                        logging.info(f"已為 {file_name} 的 {sheet_name} 添加缺失的欄位")
-
-            return  # 成功，退出循環
-        except PermissionError:
-            if attempt < max_retries - 1:
-                logging.warning(f"無法訪問 {file_name}，可能正被其他程序占用，重試 {attempt + 1}/{max_retries}")
-                input(f"請關閉 {file_name}，然後按 Enter 鍵繼續...")
-            else:
-                logging.error(f"超過最大重試次數 {max_retries}，無法訪問 {file_name}")
-                raise
-        except Exception as e:
-            logging.error(f"創建或檢查 {file_name} 時發生錯誤: {e}")
-            raise
 
 def generate_title_variants(title):
     """生成標題變體，逐步移除空格後的詞和末尾數字"""
@@ -620,116 +567,6 @@ async def process_single_url(session, semaphore, url, api_key):
     logging.info(f"完成處理 URL: {url}。找到 {len(url_found_results)} 個結果，{len(url_unfound_titles)} 個標題未找到。")
     return (url_found_results, unfound_with_source)
 
-def save_to_excel(results, filename='../data/bulk_videos.xlsx', sheet_name='Bulk'):
-    """將搜尋結果保存到 Excel 的 Bulk 工作表並刪除重複 Video URL"""
-    check_create_bulk_excel(filename, sheet_name) 
-    
-    data_to_save = []
-    for tmdb_url, _ in results: 
-        data_to_save.append([tmdb_url, '', '', '']) 
-
-    if not data_to_save:
-        logging.info("沒有新的 TMDB 結果需要保存到 Excel。")
-        return
-
-    df_new_results = pd.DataFrame(data_to_save, columns=['Video URL', 'TMDB URL', 'Split', 'Done'])
-    
-    save_to_bulk_excel(df_new_results, filename, sheet_name) 
-
-def save_to_bulk_excel(df, filename, sheet_name='Bulk'):
-    """
-    將數據追加到 bulk_videos.xlsx 的 Bulk sheet 末尾，保留現有數據。
-    (使用者需求 2025-08-19) 升級檔案鎖定機制，使其與 tmdb_importer.py/bulk_video_person.py 同步，
-    增加一個內部重試迴圈來處理來自外部程式（如 Excel）的檔案鎖定（PermissionError）以及其他暫時性寫入錯誤。
-    """
-    # --- 檔案鎖定機制 ---
-    lock_file = filename + ".lock"
-    output_filename = os.path.basename(filename)
-    
-    logging.info(f"準備寫入 '{output_filename}'，開始檢查檔案鎖...")
-
-    # --- 階段一：獲取腳本鎖 (.lock 檔案)，防止其他 Python 腳本同時寫入 ---
-    lock_acquired = False
-    script_wait_message_logged = False
-    while True:
-        try:
-            # 嘗試以獨佔模式創建鎖定檔
-            lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(lock_fd)
-            lock_acquired = True
-            if script_wait_message_logged:
-                 logging.info(f"檢測到 '{output_filename}' 已可用，現在開始寫入資料")
-            logging.info(f"成功獲取 '{output_filename}' 的腳本寫入權限。")
-            break # 成功獲取鎖，跳出迴圈
-        except FileExistsError:
-            if not script_wait_message_logged:
-                logging.info(f"'{output_filename}' 正被另一個程式實例處理中，現在等待其完成...")
-                script_wait_message_logged = True
-            time.sleep(1) # 等待 1 秒後重試
-        except Exception as e:
-            logging.error(f"獲取檔案鎖時發生未知錯誤: {e}")
-            return # 發生其他錯誤時，放棄
-
-    # --- 階段二：在持有腳本鎖的情況下，進行寫入並處理外部程式鎖 ---
-    if lock_acquired:
-        # 建立一個外層的 try...finally 結構，
-        # 目的是確保無論內部重試邏輯成功或失敗，最終都一定會執行 finally 區塊來釋放檔案鎖。
-        try:
-            write_successful = False
-            permission_error_logged = False
-            while not write_successful:
-                try:
-                    if script_wait_message_logged and not permission_error_logged:
-                        logging.info(f"檢測到 '{output_filename}' 已可用，現在開始寫入資料")
-
-                    # --- 原有的寫入邏輯 ---
-                    # 步驟 1: 讀取現有數據
-                    try:
-                        existing_df = pd.read_excel(filename, sheet_name=sheet_name, engine='openpyxl')
-                    except (FileNotFoundError, ValueError): # 處理檔案或工作表不存在的情況
-                        existing_df = pd.DataFrame(columns=['Video URL', 'TMDB URL', 'Split', 'Done', '覆蓋劇集標題', '覆蓋劇集描述', '覆蓋分集標題', '覆蓋分集描述', '來源無資料時清空TMDB', '維基人名取代現有'])
-
-                    # 步驟 2: 準備並篩選出真正新的 URL
-                    if not existing_df.empty and 'Video URL' in existing_df.columns:
-                        existing_urls = set(existing_df['Video URL'].dropna())
-                        new_unique_df = df[~df['Video URL'].isin(existing_urls)]
-                    else:
-                        new_unique_df = df
-
-                    # 步驟 3: 如果有新數據，則追加並保存
-                    if not new_unique_df.empty:
-                        final_df = pd.concat([existing_df, new_unique_df], ignore_index=True)
-                        logging.info(f"發現 {len(new_unique_df)} 個新的 URL，將其追加到 Excel 中。")
-
-                        with pd.ExcelWriter(filename, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-                            final_df.to_excel(writer, sheet_name=sheet_name, index=False)
-                        
-                        logging.info(f"成功將新數據寫入 Excel。")
-                    else:
-                        logging.info("本次運行未發現新的 URL，Excel 檔案內容未變動。")
-                    
-                    # 成功後退出重試迴圈
-                    write_successful = True
-                
-                except PermissionError:
-                    # 如果是權限錯誤，表示檔案被 Excel 等外部程式鎖定
-                    if not permission_error_logged:
-                        logging.warning(f"'{output_filename}' 正被外部程式(如 Excel)使用中，請關閉後程式將自動重試...")
-                        permission_error_logged = True
-                    time.sleep(1) # 等待 1 秒後重試
-                except Exception as e:
-                    # 如果是其他錯誤，記錄詳細訊息並終止，因為可能不是暫時性問題
-                    logging.error(f"在持有鎖的情況下寫入 Excel 時發生非預期的錯誤:")
-                    logging.error(traceback.format_exc())
-                    break # 跳出重試迴圈，放棄寫入
-        finally:
-            # (極其重要) 無論 try 區塊是否成功，都必須確保鎖定檔案被刪除
-            try:
-                os.remove(lock_file)
-                logging.info(f"已釋放 '{output_filename}' 的寫入權限。")
-            except OSError as e:
-                logging.error(f"釋放檔案鎖 '{lock_file}' 時失敗: {e}")
-
 def save_unfound_titles(titles, source_url=None, filename='../data/unfound_titles.xlsx', sheet_name='Unfound'):
     """
     將未找到的標題保存到 unfound_titles.xlsx 的 Unfound sheet，包含來源 URL。
@@ -891,10 +728,9 @@ async def main():
     print() # 完成後換行
     logging.info("所有 URL 處理完畢。")
 
-    # 保存結果到 Excel
+    # 保存結果到 txt（唔直接改 bulk_videos.xlsx）
     if all_tmdb_results_for_excel:
-        save_to_excel(all_tmdb_results_for_excel)
-        logging.info(f"所有 URL 的搜尋結果已處理並嘗試保存到 ../data/bulk_videos.xlsx 的 Bulk 工作表")
+        write_urls_txt([tmdb_url for tmdb_url, _ in all_tmdb_results_for_excel], 'wiki_bulk')
     else:
         logging.warning("所有 URL 均未找到任何有效的 TMDB 結果。")
     

@@ -42,7 +42,7 @@ start.py
 | `others/owned_procs.py` | 記錄程式自己開嘅瀏覽器 / driver PID，結束時只殺呢啲 |
 | `others/chrome_process.py`、`credentials.py` | 瀏覽器啟動、各網站登入 |
 | `monitor_gui.py` / `start.bat` | 監控面板：讀 log 同 Excel 顯示進度、啟動/停止/暫停 start.py、AI 被拒用詞清單 |
-| `sub-program/` | 獨立小工具（viu.tv 批量更新等），同主程式分開 |
+| `sub-program/` | 獨立小工具（viu.tv 批量更新等），同主程式分開。搵 TMDB 網址嘅工具**只輸出到 `sub-program/<工具>_urls.txt`**（`bulk_txt.py`），唔可以直接寫 `bulk_videos.xlsx`。MissAV 名單由 `missav_bookmarklet.html`（用家瀏覽器書籤小程式）下載，`tmdb_merged_runner.py` 選項 4 讀取 |
 | `_archive/` | 已停用嘅舊檔，唔好再用 |
 
 ### 資料與設定（全部 gitignored）

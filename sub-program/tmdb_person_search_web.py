@@ -25,6 +25,8 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.edge.service import Service as EdgeService
 from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bulk_txt import write_urls_txt  # sub-program 共用：輸出到 txt，唔直接改 bulk_videos.xlsx
 
 # --- 基本設定 ---
 # 設定日誌記錄，方便追蹤程式執行狀況
@@ -140,106 +142,6 @@ def load_configs():
             logging.error(f"讀取 configs.json 時發生錯誤: {e}")
     logging.warning(f"設定檔 {config_path} 不存在。")
     return {}
-
-def check_create_bulk_excel(file_name='../data/bulk_videos.xlsx'):
-    """檢查並創建 bulk_videos.xlsx，確保包含 Bulk 工作表及必要欄位。"""
-    output_dir = os.path.dirname(file_name)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    
-    required_columns = ['Video URL', 'TMDB URL', 'Split', 'Done', '覆蓋劇集標題', '覆蓋劇集描述', '覆蓋分集標題', '覆蓋分集描述', '來源無資料時清空TMDB', '維基人名取代現有']
-    
-    if not os.path.exists(file_name):
-        pd.DataFrame(columns=required_columns).to_excel(file_name, sheet_name='Bulk', index=False)
-        logging.info(f"已創建新的 {file_name}。")
-    else:
-        # 檢查工作表和欄位
-        try:
-            wb = openpyxl.load_workbook(file_name)
-            if 'Bulk' not in wb.sheetnames:
-                with pd.ExcelWriter(file_name, engine='openpyxl', mode='a') as writer:
-                    pd.DataFrame(columns=required_columns).to_excel(writer, sheet_name='Bulk', index=False)
-                logging.info(f"已為 {file_name} 添加 Bulk 工作表。")
-            else:
-                ws = wb['Bulk']
-                header = [cell.value for cell in ws[1]]
-                if not all(col in header for col in required_columns):
-                    logging.warning(f"{file_name} 的 Bulk 工作表欄位不完整，建議手動修正。")
-        except Exception as e:
-            logging.error(f"檢查 {file_name} 時發生錯誤: {e}")
-
-def append_to_bulk_excel(urls, file_name='../data/bulk_videos.xlsx'):
-    """
-    將 URL 添加到 bulk_videos.xlsx 的 Bulk 工作表中，並包含完整的檔案鎖定和重試機制。
-    """
-    check_create_bulk_excel(file_name)
-    lock_file = file_name + ".lock"
-    output_filename = os.path.basename(file_name)
-    
-    logging.info(f"準備寫入 '{output_filename}'，開始檢查檔案鎖...")
-
-    # 階段一：獲取腳本鎖
-    lock_acquired = False
-    for _ in range(60): # 最多等待 60 秒
-        try:
-            lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(lock_fd)
-            lock_acquired = True
-            logging.info(f"成功獲取 '{output_filename}' 的腳本寫入權限。")
-            break
-        except FileExistsError:
-            time.sleep(1)
-        except Exception as e:
-            logging.error(f"獲取檔案鎖時發生未知錯誤: {e}")
-            return
-    
-    if not lock_acquired:
-        logging.error(f"等待超時，無法獲取 '{output_filename}' 的寫入鎖。")
-        return
-
-    # 階段二：持有鎖進行寫入
-    try:
-        write_successful = False
-        for _ in range(60): # 最多等待 60 秒
-            try:
-                # 讀取現有數據
-                try:
-                    existing_df = pd.read_excel(file_name, sheet_name='Bulk')
-                except (FileNotFoundError, ValueError):
-                    existing_df = pd.DataFrame(columns=['Video URL'])
-
-                # 篩選出新的 URL
-                new_urls_df = pd.DataFrame(urls, columns=['Video URL'])
-                existing_urls = set(existing_df['Video URL'].dropna())
-                new_unique_df = new_urls_df[~new_urls_df['Video URL'].isin(existing_urls)]
-
-                if not new_unique_df.empty:
-                    logging.info(f"發現 {len(new_unique_df)} 個新的 URL，將其追加到 {output_filename} 中。")
-                    final_df = pd.concat([existing_df, new_unique_df], ignore_index=True)
-                    with pd.ExcelWriter(file_name, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-                        final_df.to_excel(writer, sheet_name='Bulk', index=False)
-                else:
-                    logging.info("本次運行未發現新的 URL，Excel 檔案內容未變動。")
-                
-                write_successful = True
-                break
-            except PermissionError:
-                logging.warning(f"'{output_filename}' 正被外部程式(如 Excel)使用中，等待 1 秒後重試...")
-                time.sleep(1)
-            except Exception as e:
-                logging.error(f"寫入 Excel 時發生非預期的錯誤: {traceback.format_exc()}")
-                break
-        
-        if not write_successful:
-            logging.error(f"重試多次後仍無法寫入 '{output_filename}'。")
-
-    finally:
-        # 確保釋放鎖
-        try:
-            os.remove(lock_file)
-            logging.info(f"已釋放 '{output_filename}' 的寫入權限。")
-        except OSError as e:
-            logging.error(f"釋放檔案鎖 '{lock_file}' 時失敗: {e}")
 
 # =====================================================================================
 #  全新 Web 搜尋及登入相關函數
@@ -936,12 +838,10 @@ async def async_main():
         
         logging.info(f"檢查完成。共有 {len(final_urls)} 個影片包含中文內容。")
 
-    # --- 步驟 5: 將結果寫入 Excel ---
+    # --- 步驟 5: 將結果寫入 txt（唔直接改 bulk_videos.xlsx）---
     if final_urls:
-        output_file = os.path.join(os.path.dirname(__file__), '../data/bulk_videos.xlsx')
-        append_to_bulk_excel(sorted(list(set(final_urls))), file_name=output_file)
-        absolute_path = os.path.abspath(output_file)
-        print(f"\n已將 {len(final_urls)} 個結果加入到 {absolute_path} 的 Bulk 工作表中。")
+        path, added = write_urls_txt(sorted(set(final_urls)), 'tmdb_person_search_web')
+        print(f"\n已將 {added} 個新結果寫入 {path}。")
     else:
         print("\n未找到任何包含中文內容的關聯影片。")
 

@@ -9,6 +9,8 @@ import traceback
 import json
 import asyncio
 import httpx
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bulk_txt import write_urls_txt  # sub-program 共用：輸出到 txt，唔直接改 bulk_videos.xlsx
 
 # --- 設定日誌 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -89,31 +91,6 @@ def normalize_tmdb_url(url):
     if match:
         return f"https://www.themoviedb.org/{match.group(1)}/{match.group(2)}"
     return None
-
-def check_create_bulk_excel(file_name='data/bulk_videos.xlsx'):
-    """檢查並創建 bulk_videos.xlsx"""
-    output_dir = os.path.dirname(file_name)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    
-    required_sheets = {
-        'Bulk': ['Video URL', 'TMDB URL', 'Split', 'Done', '覆蓋劇集標題', '覆蓋劇集描述', '覆蓋分集標題', '覆蓋分集描述', '來源無資料時清空TMDB', '維基人名取代現有']
-    }
-    
-    # 這裡不進行異常處理，讓錯誤向上拋出給 main 函數的重試迴圈處理
-    if not os.path.exists(file_name):
-        with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-            for sheet, columns in required_sheets.items():
-                pd.DataFrame(columns=columns).to_excel(writer, sheet_name=sheet, index=False)
-        logging.info(f"已創建新的 {file_name}")
-    else:
-        workbook = openpyxl.load_workbook(file_name)
-        if 'Bulk' not in workbook.sheetnames:
-            workbook.create_sheet('Bulk')
-            df = pd.DataFrame(columns=required_sheets['Bulk'])
-            with pd.ExcelWriter(file_name, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-                df.to_excel(writer, sheet_name='Bulk', index=False)
-        workbook.close()
 
 # --- API 檢查邏輯 ---
 async def check_chinese_content(client, semaphore, url, api_key):
@@ -270,117 +247,11 @@ async def main():
         print() # 換行
 
     if not valid_urls_with_chinese:
-        logging.info("檢查完畢，所有輸入的影片均無中文內容，不執行 Excel 操作。")
+        logging.info("檢查完畢，所有輸入的影片均無中文內容，冇嘢要輸出。")
         return
 
-    logging.info(f"檢查完畢，共 {len(valid_urls_with_chinese)} 個影片包含中文，準備寫入 Excel。")
-
-    # 5. Excel 寫入邏輯 (保留原本的鎖定機制)
-    output_file = os.path.join(project_root, 'data', 'bulk_videos.xlsx')
-    output_filename = os.path.basename(output_file)
-    lock_file = output_file + ".lock"
-
-    # --- 階段一：獲取腳本鎖 (.lock 檔案) ---
-    lock_acquired = False
-    script_wait_message_logged = False
-    
-    while True:
-        try:
-            lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(lock_fd)
-            lock_acquired = True
-            logging.info(f"成功獲取 '{output_filename}' 的寫入權限。")
-            break
-        except FileExistsError:
-            if not script_wait_message_logged:
-                logging.info(f"'{output_filename}' 正被使用中，等待中...")
-                script_wait_message_logged = True
-            time.sleep(1)
-        except Exception as e:
-            logging.error(f"獲取檔案鎖錯誤: {e}")
-            return
-
-    # --- 階段二：處理資料 (無限重試機制) ---
-    if lock_acquired:
-        try:
-            write_successful = False
-            permission_error_logged = False
-            
-            # [更新]: 這是一個無限迴圈，直到寫入成功或發生非權限錯誤
-            while not write_successful:
-                try:
-                    # 嘗試檢查/建立 Excel 結構
-                    check_create_bulk_excel(output_file)
-                    
-                    # 嘗試讀取現有 Excel
-                    existing_df = pd.read_excel(output_file, sheet_name='Bulk')
-                    
-                    if 'Done' not in existing_df.columns:
-                        existing_df['Done'] = ''
-
-                    updated_count = 0
-                    added_count = 0
-                    new_rows = []
-
-                    existing_normalized = existing_df['Video URL'].apply(normalize_tmdb_url)
-
-                    for url in valid_urls_with_chinese:
-                        match_indices = existing_df.index[existing_normalized == url].tolist()
-                        
-                        if match_indices:
-                            # 已存在 -> 清空 Done
-                            for idx in match_indices:
-                                current_done = existing_df.at[idx, 'Done']
-                                if pd.notna(current_done) and str(current_done).strip() != '':
-                                    existing_df.at[idx, 'Done'] = None
-                                    updated_count += 1
-                        else:
-                            # 不存在 -> 新增
-                            new_row = {
-                                'Video URL': url,
-                                'TMDB URL': '', 
-                                'Split': '', 
-                                'Done': None
-                            }
-                            new_rows.append(new_row)
-                            added_count += 1
-
-                    if new_rows:
-                        new_df = pd.DataFrame(new_rows)
-                        existing_df = pd.concat([existing_df, new_df], ignore_index=True)
-
-                    if updated_count > 0 or added_count > 0:
-                        logging.info(f"處理結果: 更新(清空 Done) {updated_count} 筆, 新增 {added_count} 筆。")
-                        
-                        # [重要]: 嘗試寫入，如果這裡發生 PermissionError，會被下方的 except 捕捉
-                        with pd.ExcelWriter(output_file, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-                            existing_df.to_excel(writer, sheet_name='Bulk', index=False)
-                        logging.info("Excel 寫入成功。")
-                    else:
-                        logging.info("符合條件的 URL 已存在且狀態正確，無須變更。")
-
-                    # 若執行到此，表示成功，設定旗標離開迴圈
-                    write_successful = True
-
-                except PermissionError:
-                    # [更新]: 捕捉到權限錯誤時，只顯示一次警告，然後無限重試
-                    if not permission_error_logged:
-                        logging.warning(f"檢測到權限錯誤：'{output_filename}' 可能正被開啟。程式將自動等待重試，請關閉該檔案以繼續...")
-                        permission_error_logged = True
-                    # 等待 1 秒後重試，不使用 input()
-                    time.sleep(1)
-                
-                except Exception as e:
-                    # 其他錯誤則中斷
-                    logging.error(f"寫入 Excel 時發生錯誤: {traceback.format_exc()}")
-                    break
-
-        finally:
-            try:
-                os.remove(lock_file)
-                logging.info(f"已釋放檔案鎖。")
-            except OSError:
-                pass
+    logging.info(f"檢查完畢，共 {len(valid_urls_with_chinese)} 個影片包含中文。")
+    write_urls_txt(valid_urls_with_chinese, 'manage_video_urls')
 
 if __name__ == '__main__':
     if sys.platform == "win32":
