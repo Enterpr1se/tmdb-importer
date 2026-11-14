@@ -1510,6 +1510,8 @@ def uploader_worker(upload_queue, excel_lock, configs, overwrite_titles, overwri
         from others.credentials import login
         max_retries = 3
         for i in range(max_retries):
+            if utils._PROGRAM_INTERRUPTED:   # 【2026-11-14】停止中唔再開瀏覽器
+                return None
             try:
                 log.info(f"[Uploader] 正在啟動瀏覽器並登入 (嘗試 {i+1}/{max_retries})...")
                 driver_tuple = get_browser_driver(profile_suffix='_uploader', remote_port=9223)
@@ -1556,6 +1558,9 @@ def uploader_worker(upload_queue, excel_lock, configs, overwrite_titles, overwri
 
         if is_driver_alive:
             return True
+        # 【2026-11-14】已收到停止信號：唔重開瀏覽器（以前會重試 3 次再開 Edge、下載 driver，拖慢停止約 1 分鐘）
+        if utils._PROGRAM_INTERRUPTED:
+            return False
 
         log.info("[Uploader] " + ("首次初始化瀏覽器..." if driver is None else "檢測到瀏覽器已斷開，正在嘗試重新啟動並登入..."))
         if driver:
@@ -1649,7 +1654,11 @@ def uploader_worker(upload_queue, excel_lock, configs, overwrite_titles, overwri
                             log.warning(f"[Uploader] 套用 master 強制清空時發生錯誤: {clear_err}")
 
                         upload_success = False
-                        if not ensure_uploader_driver_ready():
+                        driver_ready = ensure_uploader_driver_ready()
+                        if not driver_ready and utils._PROGRAM_INTERRUPTED:
+                            # 【2026-11-14】停止中：唔上傳、唔寫 Done，下次啟動會重新處理呢行
+                            log.warning(f"[Uploader] 程式停止中，未上傳任務 (索引: {row_index})，下次啟動會重新處理。")
+                        elif not driver_ready:
                             log.error(f"[Uploader] 無法啟動瀏覽器，跳過此任務 (索引: {row_index})。")
                             update_done_value_fast(row_index, 0)
                         else:

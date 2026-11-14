@@ -1409,8 +1409,12 @@ def replace_name_in_bio(final_bio, old_names_list, new_name):
 
     modified_bio = str(final_bio)
     
+    # 【2026-11-14】去前後空格；中文舊名再加香港寫法（同簡介一樣用 normalize_to_hk(field_type='bio')），
+    # 例如 zh-CN「大卫·爱登堡」→「大衛·愛登堡」，先配對到轉換後簡介入面嘅「大衛·愛登堡」。
+    stripped = [n.strip() for n in old_names_list if isinstance(n, str) and n.strip()]
+    stripped += [normalize_to_hk(n, field_type='bio') for n in stripped if is_chinese(n)]
     # 過濾空值、去重，並按長度倒序排序以優先匹配長名稱
-    all_old_names_to_try = sorted(list(set(filter(None, old_names_list))), key=len, reverse=True)
+    all_old_names_to_try = sorted(list(set(filter(None, stripped))), key=len, reverse=True)
     
     logging.info(f"Bio 姓名替換：嘗試使用 '{new_name}' 替換簡介中的舊姓名: {all_old_names_to_try}")
     
