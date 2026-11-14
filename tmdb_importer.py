@@ -40,6 +40,7 @@ from others.chrome_process import check_and_update_dependencies, get_browser_dri
 from others.clear_titles import clear_title, process_titles
 from others.analysis_excel import is_generic_title
 from others import utils # 導入整個 utils 模塊
+from others import pending_uploads  # 【2026-11-14】已提取未上傳項目記錄（下次啟動可保留）
 from importers.tmdb_uploader import upload_to_tmdb, upload_person_to_tmdb, extract_tv_show_id, extract_movie_id, extract_person_id
 from extractors.tmdb_extractor import main as extract_tmdb_data_selenium
 from extractors.tmdb_extractor_api import main as extract_tmdb_data_api, extract_person_details
@@ -56,6 +57,8 @@ import time # 【新增】導入 time 模組以使用 time.sleep()
 # 【新增】全局變數，用於執行緒間的同步和資料交換
 EXCEL_LOCK = threading.Lock()
 DETAILS_CACHE_DIR = os.path.join('data', 'details_cache')
+# 【2026-11-14】今次啟動選項（記錄落 pending_uploads.json；下次啟動選項唔同就唔保留）。由 main() 設定。
+_RUN_OPTIONS = {}
 
 # 【共享緩存】所有 extractor threads 共用同一份 in-memory DataFrame
 # 由 background refresher 定時更新，threads 讀取時完全不需要 EXCEL_LOCK
@@ -1090,7 +1093,7 @@ def extractor_worker(extract_queue, upload_queue, excel_lock, tmdb_extractor, ap
                             in_progress_indices.discard(row_index)
                 else:
                     log.info(f"[Extractor] 提取成功 (索引: {row_index})，將任務放入上傳隊列。")
-                    upload_queue.put({
+                    _upload_task = {
                         'row_index': row_index,
                         'details_file': output_excel_path,
                         'tmdb_url': final_tmdb_url,
@@ -1098,7 +1101,13 @@ def extractor_worker(extract_queue, upload_queue, excel_lock, tmdb_extractor, ap
                         'video_url': video_url,
                         'no_chinese_skip': no_chinese,
                         'row_options': row_opts,
-                    })
+                    }
+                    # 【2026-11-14】記錄落 pending_uploads.json：停咗未上傳嘅話，下次啟動可以揀保留
+                    try:
+                        pending_uploads.record(_upload_task, utils.BULK_SHEET, pending_uploads.row_fingerprint(row), _RUN_OPTIONS)
+                    except Exception as _rec_err:
+                        log.warning(f"[Extractor] 記錄未上傳項目失敗 (索引: {row_index}): {_rec_err}")
+                    upload_queue.put(_upload_task)
                     # in_progress will be removed by uploader_worker after upload completes
             else:
                 log.error(f"[Extractor] 提取失敗 (索引: {row_index})，此項目將不會被上傳。將 Done 標記為 0。")
@@ -1694,6 +1703,10 @@ def uploader_worker(upload_queue, excel_lock, configs, overwrite_titles, overwri
                     with in_progress_lock:
                         in_progress_indices.discard(row_index)
                 safe_remove_file(details_file)
+                try:
+                    pending_uploads.remove(row_index)   # 【2026-11-14】上傳完 / 跳過 / 失敗 / 中斷 → 唔再保留
+                except Exception:
+                    pass
                 upload_queue.task_done()
 
     except KeyboardInterrupt:
@@ -1912,7 +1925,7 @@ def _switch_bulk_sheet(next_sheet, excel_lock, log, file_path='data/bulk_videos.
 
 def main(mode='single', overwrite_titles='ask', overwrite_descriptions='ask', clear_when_source_empty='n',
          episode_overwrite_titles=None, episode_overwrite_descriptions=None, wiki_name_replace='n',
-         bulk_sheet=None):
+         bulk_sheet=None, keep_pending_uploads='n'):
     """
     【重構】程式主入口點，負責設置和管理執行緒。
     【修改】更新 single 模式下的邏輯，以處理 extract_and_save_details 新增的回傳值，
@@ -1966,6 +1979,13 @@ def main(mode='single', overwrite_titles='ask', overwrite_descriptions='ask', cl
 
     configs = load_configs()
     tmdb_extractor, api_key, uses_api = get_tmdb_extractor(configs)
+    # 【2026-11-14】今次啟動選項：提取結果受呢啲影響，下次啟動選項唔同就唔保留上次未上傳嘅項目
+    global _RUN_OPTIONS
+    _RUN_OPTIONS = {'uses_api': bool(uses_api), 'overwrite_titles': overwrite_titles, 'overwrite_descriptions': overwrite_descriptions,
+                    'episode_overwrite_titles': utils.EPISODE_OVERWRITE_TITLES or None,
+                    'episode_overwrite_descriptions': utils.EPISODE_OVERWRITE_DESCRIPTIONS or None,
+                    'clear_when_source_empty': utils.CLEAR_TMDB_WHEN_SOURCE_EMPTY,
+                    'wiki_name_replace': utils.WIKI_NAME_REPLACES_EXISTING}
 
     if mode == 'bulk':
         log.info("進入並行 Bulk 模式")
@@ -1987,9 +2007,30 @@ def main(mode='single', overwrite_titles='ask', overwrite_descriptions='ask', cl
         # extractor threads 從此緩存讀取，完全不持有 EXCEL_LOCK，消除讀寫競爭
         start_shared_cache_refresher(excel_lock=EXCEL_LOCK)
         
+        # 【2026-11-14】用家揀保留：上次已提取未上傳、而且符合條件嘅項目直接放返入上傳佇列
+        kept_upload_tasks = []
+        if str(keep_pending_uploads or 'n').strip().lower().startswith('y'):
+            try:
+                # 共享緩存係背景執行緒讀，啟動時未必讀好 → 呢度同步讀一次
+                with EXCEL_LOCK:
+                    _keep_df = pd.read_excel('data/bulk_videos.xlsx', sheet_name=utils.BULK_SHEET, engine='openpyxl')
+                kept_upload_tasks, _dropped = pending_uploads.select_keepable(
+                    utils.BULK_SHEET, _RUN_OPTIONS, lambda i: _keep_df.iloc[i] if 0 <= i < len(_keep_df) else None)
+                log.info(f"[保留未上傳] 保留 {len(kept_upload_tasks)} 個上次已提取未上傳嘅項目，唔使重新提取"
+                         + (f"；放棄 {sum(_dropped.values())} 個（{', '.join(f'{k} {v}' for k, v in _dropped.items())}），會重新提取" if _dropped else "") + "。")
+            except Exception as e:
+                log.warning(f"[保留未上傳] 讀取上次未上傳記錄失敗，全部重新提取: {e}")
+                kept_upload_tasks = []
+        if kept_upload_tasks:
+            _keep = {os.path.normcase(os.path.abspath(t['details_file'])) for t in kept_upload_tasks}
+            for _name in os.listdir(DETAILS_CACHE_DIR):
+                _path = os.path.join(DETAILS_CACHE_DIR, _name)
+                if os.path.isfile(_path) and os.path.normcase(os.path.abspath(_path)) not in _keep and _name != os.path.basename(pending_uploads.MANIFEST_FILE):
+                    safe_remove_file(_path)
+            pending_uploads.retain(t['row_index'] for t in kept_upload_tasks)
         # 清理舊的詳細資料快取
-        log.info(f"正在清理並重建快取目錄: {DETAILS_CACHE_DIR}")
-        if os.path.exists(DETAILS_CACHE_DIR):
+        elif os.path.exists(DETAILS_CACHE_DIR):
+            log.info(f"正在清理並重建快取目錄: {DETAILS_CACHE_DIR}")
             try:
                 shutil.rmtree(DETAILS_CACHE_DIR)
             except PermissionError as e:
@@ -2039,6 +2080,12 @@ def main(mode='single', overwrite_titles='ask', overwrite_descriptions='ask', cl
             # claimed_this_session：本輪執行已入隊／處理中的 row，避免上傳尚未寫 Done 時被重新掃描重複提取
             processed_indices = set()
             claimed_this_session = set()
+            # 【2026-11-14】保留嘅上次未上傳項目：直接放入上傳佇列，主循環唔會再提取佢哋
+            for _t in kept_upload_tasks:
+                with in_progress_lock:
+                    in_progress_indices.add(_t['row_index'])
+                claimed_this_session.add(_t['row_index'])
+                upload_queue.put(_t)
             _sheet_no = 0
             log.info(f"[工作表] 開始處理工作表 '{utils.BULK_SHEET}'（第 1/{len(utils.BULK_SHEETS)} 張）")
 
@@ -2420,10 +2467,15 @@ if __name__ == "__main__":
     param_bulk_sheet = None
     if current_mode == 'bulk':
         param_bulk_sheet = get_user_input_with_timeout("bulk 模式要處理 bulk_videos.xlsx 邊一張工作表？(名稱或編號；多張用逗號分隔，按次序處理，例如 1, 13；默認 Bulk): ", timeout=600) or None
+    param_keep_pending = 'n'
+    if current_mode == 'bulk' and pending_uploads.count_pending()[0]:
+        print(f"上次有 {pending_uploads.count_pending()[0]} 個已提取但未上傳嘅項目。【提醒】請確認上次之後冇改過 bulk_videos.xlsx 嗰啲行。")
+        param_keep_pending = get_user_input_with_timeout("是否保留上次已提取但未上傳嘅項目，直接上傳？(y/n, 默認 n = 重新提取): ", timeout=600) or 'n'
     
     main(mode=current_mode, overwrite_titles=param_overwrite_titles, overwrite_descriptions=param_overwrite_descriptions,
          clear_when_source_empty=param_clear_when_source_empty,
          wiki_name_replace=param_wiki_name_replace,
          bulk_sheet=param_bulk_sheet,
+         keep_pending_uploads=param_keep_pending,
          episode_overwrite_titles=param_ep_overwrite_titles,
          episode_overwrite_descriptions=param_ep_overwrite_descriptions)

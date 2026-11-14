@@ -1779,6 +1779,39 @@ def reload_dictionaries_and_converters(dict_dir='opencc_data/dictionary'):
     except Exception as e:
         logging.warning(f"[AI簡轉繁] 重新載入觸發字失敗: {e}")
 
+def _uploader_pause_requested():
+    """【2026-11-14】上傳執行緒專用：「暫停上傳」或「暫停」旗標存在。extractor 等其他執行緒一律 False。"""
+    import threading
+    if threading.current_thread().name != 'UploaderThread':
+        return False
+    return any(os.path.exists(f) for f in (PAUSE_FLAG, UPLOAD_PAUSE_FLAG))
+
+
+def _wait_if_uploader_paused():
+    """【2026-11-14】上傳執行緒喺頁面步驟之間即時暫停；繼續後回傳 True（曾暫停）。暫停期間按停止照樣中斷。"""
+    if not _uploader_pause_requested():
+        return False
+    wait_if_paused(logging.getLogger('importer'), 'Uploader', (PAUSE_FLAG, UPLOAD_PAUSE_FLAG))
+    if _program_interrupted_callback_for_utils():
+        raise KeyboardInterrupt("Program interrupted by user signal while upload paused.")
+    return True
+
+
+def _limit_wait(seconds):
+    """限流等待：每秒檢查停止同暫停。返回 True = 因暫停而提早結束（已等到繼續）。"""
+    start = time.time()
+    while time.time() - start < seconds:
+        if _program_interrupted_callback_for_utils():
+            logging.warning("check_wait_and_try_again: 在等待期間檢測到程序中斷信號。")
+            raise KeyboardInterrupt("Program interrupted by user signal during wait period.")
+        if _uploader_pause_requested():
+            logging.info("check_wait_and_try_again: 限流等待期間按咗暫停，停止倒數。")
+            _wait_if_uploader_paused()
+            return True
+        time.sleep(max(0.001, min(1, seconds - (time.time() - start))))
+    return False
+
+
 def check_wait_and_try_again(driver, current_url=None, video_url=None):
     """
     【修改】檢查是否有 'Wait and try again' 訊息。
@@ -1797,6 +1830,8 @@ def check_wait_and_try_again(driver, current_url=None, video_url=None):
         if _program_interrupted_callback_for_utils():
             logging.warning("check_wait_and_try_again: 檢測到程序中斷信號，將引發 KeyboardInterrupt。")
             raise KeyboardInterrupt("Program interrupted by user signal during check_wait_and_try_again.")
+        # 【2026-11-14】上傳執行緒：按咗暫停就喺呢個頁面步驟停低，繼續後由呢度接住做
+        _wait_if_uploader_paused()
 
         retry_count += 1
         # 只有第一次檢查時記錄 debug，避免刷屏，除非真的遇到問題
@@ -1824,21 +1859,9 @@ def check_wait_and_try_again(driver, current_url=None, video_url=None):
 
             logging.warning(f"發現 'Wait and try again' 訊息。將等待 {wait_minutes} 分鐘後重新載入頁面 (重試第 {retry_count} 次)...")
 
-            # 在等待期間，定期檢查中斷信號
-            start_sleep = time.time()
-            while time.time() - start_sleep < wait_time_seconds:
-                if _program_interrupted_callback_for_utils():
-                    logging.warning("check_wait_and_try_again: 在等待期間檢測到程序中斷信號。")
-                    raise KeyboardInterrupt("Program interrupted by user signal during wait period.")
-                
-                # 睡眠剩餘時間或者最多1秒，以確保能快速響應中斷
-                sleep_duration = max(0, min(1, wait_time_seconds - (time.time() - start_sleep)))
-                if sleep_duration > 0:
-                    time.sleep(sleep_duration)
-                elif time.time() - start_sleep < wait_time_seconds:
-                    time.sleep(0.001)
-                else:
-                    break
+            # 在等待期間，定期檢查中斷信號同暫停【2026-11-14】暫停 → 停止倒數；繼續後即刻重新載入，等待由 1 分鐘重新計
+            if _limit_wait(wait_time_seconds):
+                retry_count = 0
 
             # 重新載入頁面
             page_to_reload = current_url if current_url else driver.current_url
@@ -1878,8 +1901,9 @@ def check_wait_and_try_again(driver, current_url=None, video_url=None):
             encountered_limit = True
             wait_minutes_on_exc = min(retry_count, 10)
             logging.error(f"檢查限流時發生錯誤: {e}。視為潛在阻擋，等待 {wait_minutes_on_exc} 分鐘後重試...")
-            time.sleep(wait_minutes_on_exc * 60)
-            
+            if _limit_wait(wait_minutes_on_exc * 60):   # 【2026-11-14】以前係 time.sleep，停止 / 暫停都要等完
+                retry_count = 0
+
             # 嘗試重新載入
             try:
                 page_to_reload = current_url if current_url else driver.current_url

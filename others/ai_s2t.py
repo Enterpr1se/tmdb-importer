@@ -330,7 +330,8 @@ def record_rejected(src_s, final_s, ai_s, model, seen_at=None):
     ai_s = _answer_text(ai_s)
     if not isinstance(ai_s, str) or not final_s or final_s == ai_s:
         return False
-    spans = _rejected_spans(final_s, ai_s, load_name_map_words())
+    # 【2026-11-14】AI No Change 字詞同 tw_hk_name 譯名一樣唔記錄：用家已決定唔改（例如 台），列出只係噪音
+    spans = _rejected_spans(final_s, ai_s, list(load_name_map_words() or ()) + list(load_no_change_words() or ()))
     if not spans:
         return False
     k = hashlib.sha1((final_s + '\x00' + ai_s).encode('utf-8')).hexdigest()

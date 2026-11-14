@@ -313,6 +313,10 @@ def main():
         if mode == 'bulk':
             _print_bulk_sheets()
             bulk_sheet = get_user_input_with_timeout("bulk 模式要處理 bulk_videos.xlsx 邊一張工作表？(名稱或編號；多張用逗號分隔，按次序處理，例如 1, 13；默認 Bulk): ", default='') or None
+        # 【2026-11-14】上次已提取未上傳嘅項目：有先問；監控面板以「保留上次已提取」字眼自動代答（改字眼要同步 monitor_gui.AUTO_ANSWERS）
+        keep_pending_uploads = 'n'
+        if mode == 'bulk':
+            keep_pending_uploads = _ask_keep_pending_uploads()
     except Exception as e:
         print(f"錯誤：無法收集用戶輸入，請檢查終端環境: {e}\n{traceback.format_exc()}")
         sys.exit(1)
@@ -329,11 +333,30 @@ def main():
                            clear_when_source_empty=clear_when_source_empty,
                            wiki_name_replace=wiki_name_replace,
                            bulk_sheet=bulk_sheet,
+                           keep_pending_uploads=keep_pending_uploads,
                            episode_overwrite_titles=episode_overwrite_titles,
                            episode_overwrite_descriptions=episode_overwrite_descriptions)
     except Exception as e:
         print(f"錯誤：運行 tmdb_importer 失敗: {e}\n{traceback.format_exc()}")
         sys.exit(1)
+
+def _ask_keep_pending_uploads():
+    """【2026-11-14】上次有已提取但未上傳嘅項目就問要唔要保留（默認 n = 重新提取）。"""
+    try:
+        from others.pending_uploads import count_pending
+        n, last = count_pending()
+    except Exception:
+        return 'n'
+    if not n:
+        return 'n'
+    print('=' * 80)
+    print(f"上次有 {n} 個已提取但未上傳嘅項目（最後記錄 {last or '—'}）。")
+    print("【提醒】保留前請確認：上次之後冇改過 bulk_videos.xlsx 嗰啲行嘅內容。")
+    print("  程式會自動檢查：工作表、啟動選項、該行內容（Done 以外）同上次一樣，Done 仲係空，先會保留；唔符合嘅會重新提取。")
+    print("  保留嘅內容係上次提取嘅結果，上次之後嘅程式修正唔會套用落去（上傳前仍會同 TMDB 比較）。")
+    print('=' * 80)
+    ans = get_user_input_with_timeout("是否保留上次已提取但未上傳嘅項目，直接上傳？(y/n, 默認 n = 重新提取): ", default='n')
+    return 'y' if str(ans or '').strip().lower().startswith('y') else 'n'
 
 def _disable_quickedit():
     """禁用 Windows 終端機 QuickEdit Mode，防止滑鼠點擊/選取時意外暫停程式。"""

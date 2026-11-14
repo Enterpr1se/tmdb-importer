@@ -12,7 +12,7 @@ TMDB-parallel 監控面板（唯讀）
   啟動提問按面板設定經 stdin 自動回答，其餘提問可在面板輸入；「■ 停止」向該主控台送出 Ctrl+C。
   面板自己只寫 monitor_settings.json、data/monitor_console.log 及暫停旗標 data/.pause、data/.pause_upload。
 - 「暫停」建立 data/.pause：主程式做完手上項目後不開始新項目；「繼續」刪除旗標。
-- 「暫停上傳」建立 data/.pause_upload：只有 uploader 做完手上項目後停低，extractor 繼續提取，
+- 「暫停上傳」建立 data/.pause_upload：uploader 喺下一個頁面步驟即時停低（2026-11-14 起，包括限流等待中），extractor 繼續提取，
   提取結果留喺上傳佇列；「繼續上傳」刪除旗標，uploader 由佇列繼續上傳。
 - Windows 上以 FILE_SHARE_DELETE 方式開檔：主程式啟動時清除 log、log 輪替、
   Excel 以暫存檔取代 (os.replace) 時都不會因本面板而失敗。
@@ -363,6 +363,8 @@ RUN_OPTIONS = [
     ('clear_when_source_empty', '來源無資料時清空TMDB', ['n', 'y'], 'n'),
     # 西方人名：n = TMDB 已有香港人名就保留；y = 用中文維基 zh-hk 譯名取代
     ('wiki_name_replace', '維基人名取代現有', ['n', 'y'], 'n'),
+    # 【2026-11-14】bulk：上次已提取未上傳嘅項目保留直接上傳（只有上次有剩先會問；程式會檢查該行內容同啟動選項冇改）
+    ('keep_pending_uploads', '保留上次未上傳', ['n', 'y'], 'n'),
     ('mode', '模式', ['bulk', 'single'], 'bulk'),
     # bulk 模式處理 bulk_videos.xlsx 邊幾張工作表（逗號分隔，按次序處理；用「選擇…」對話框揀）
     ('bulk_sheet', 'bulk 工作表', [], 'Bulk'),
@@ -371,7 +373,8 @@ RUN_OPTIONS = [
 AUTO_ANSWERS = [('是否覆蓋劇集標題', 'overwrite_titles'), ('是否覆蓋劇集描述', 'overwrite_descriptions'),
                 ('是否覆蓋分集標題', 'episode_overwrite_titles'), ('是否覆蓋分集描述', 'episode_overwrite_descriptions'),
                 ('來源無資料時是否清空', 'clear_when_source_empty'), ('維基香港譯名取代', 'wiki_name_replace'),
-                ('運行模式', 'mode'), ('處理 bulk_videos.xlsx 邊一張工作表', 'bulk_sheet')]
+                ('運行模式', 'mode'), ('處理 bulk_videos.xlsx 邊一張工作表', 'bulk_sheet'),
+                ('保留上次已提取', 'keep_pending_uploads')]
 SECRET_PROMPT_RE = re.compile(r'password|密碼|驗證碼', re.I)
 # 沒有提問文字但正等待 Enter 的情況（例如「請關閉 Excel 後按 Enter」）
 ENTER_HINT_RE = re.compile(r'按 ?Enter')
@@ -1711,11 +1714,12 @@ class MonitorApp:
         total = len(self.excel_rows)
         counts = collections.Counter(self._row_values(i, r)[0] for i, r in enumerate(self.excel_rows))
         done = counts['完成'] + counts['完成 (未寫入)']
-        active = counts['提取中'] + counts['等待上傳'] + counts['上傳中']
         val, sub = self.cards['excel']
         val.configure(text=f'{done} / {total}' if total else '—')
         _sheet = self.collector.bulk_sheet + (f'（{self.state.sheet_progress}）' if self.state.sheet_progress else '')
-        sub.configure(text=f'{_sheet} · 進行中 {active} · 待處理 {counts["待處理"]} · 失敗 {counts["失敗"]}')
+        # 【2026-11-14】進行中分開顯示，睇到有幾多已提取、排緊隊等上傳
+        sub.configure(text=f'{_sheet} · 待處理 {counts["待處理"]} · 失敗 {counts["失敗"]}\n'
+                           f'提取中 {counts["提取中"]} · 等待上傳 {counts["等待上傳"]} · 上傳中 {counts["上傳中"]}')
         self.progress.configure(maximum=max(total, 1), value=done)
 
         c = st.counts
@@ -1840,7 +1844,8 @@ class MonitorApp:
                                f'覆蓋分集標題={opts["episode_overwrite_titles"]}, 覆蓋分集描述={opts["episode_overwrite_descriptions"]}, '
                                f'來源無資料時清空TMDB={opts["clear_when_source_empty"]}, '
                                f'維基人名取代現有={opts["wiki_name_replace"]}, '
-                               f'模式={opts["mode"]}, bulk 工作表={opts["bulk_sheet"]}) ====\n').encode('utf-8'))
+                               f'模式={opts["mode"]}, bulk 工作表={opts["bulk_sheet"]}, '
+                               f'保留上次未上傳={opts.get("keep_pending_uploads", "n")}) ====\n').encode('utf-8'))
                     out.flush()
                     self.child = subprocess.Popen([python, '-u', 'start.py'], cwd=self.base, env=env,
                                                   stdin=subprocess.PIPE, stdout=out, stderr=subprocess.STDOUT, **kw)
@@ -1881,7 +1886,8 @@ class MonitorApp:
             else:
                 os.makedirs(os.path.dirname(self.upload_pause_path), exist_ok=True)
                 open(self.upload_pause_path, 'w').close()
-                self.flash('已暫停上傳：上傳中的項目會完成，之後 uploader 停低；extractor 繼續提取（只限 bulk 模式）。'
+                self.flash('已暫停上傳：uploader 會喺下一個頁面步驟停低（包括限流等待中），繼續後由停低位置接住做；'
+                           'extractor 繼續提取（只限 bulk 模式）。'
                            '按「繼續上傳」恢復。', 20)
         except OSError as e:
             self.flash(f'暫停／繼續上傳失敗: {e}', 20)
